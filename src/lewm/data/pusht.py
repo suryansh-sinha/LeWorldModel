@@ -21,18 +21,18 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-N_GROUPS = 185
-EPS_PER_GROUP = 101
-N_VAL_GROUPS = 19
-SPLIT_SEED = 3072
-NUM_FRAMES = 4
-FRAMESKIP = 5
-WINDOW = NUM_FRAMES * FRAMESKIP  # 20 env steps
+N_GROUPS = 185          # Total 185 expert demonstrations in dataset
+EPS_PER_GROUP = 101     # Each demonstration has 100 more noisy episodes. Total 101
+N_VAL_GROUPS = 19       # Val set has 19 of 185 demonstrations. Rest in train set.
+SPLIT_SEED = 3072       # Seed for reproducibility
+NUM_FRAMES = 4          # Each sample has 4 observations (frames)
+FRAMESKIP = 5           # Observations are 5 environment steps apart (5 frames apart)
+WINDOW = NUM_FRAMES * FRAMESKIP  # 20 env steps so 20 action vectors i.e. 4,5,2
 SPLIT_PATH = Path("configs/splits/pusht_group_split.json")
 
 
 def make_group_split(n_groups: int = N_GROUPS, n_val: int = N_VAL_GROUPS, seed: int = SPLIT_SEED) -> dict:
-    perm = np.random.default_rng(seed).permutation(n_groups)
+    perm = np.random.default_rng(seed).permutation(n_groups)    # Creates shuffled list for each demonstration ID [0,184]
     return {
         "seed": seed,
         "train_groups": sorted(int(g) for g in perm[n_val:]),

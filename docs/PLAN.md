@@ -94,7 +94,7 @@ Running three seeds is a stretch goal.
 - A saved image grid of a few windows looks right.
 
 ### Phase 1: Model
-- Build the encoder, projectors, action encoder, and predictor.
+- [x] Build the encoder, projectors, action encoder, and predictor.
 
 **Done when:**
 - The shapes are right.

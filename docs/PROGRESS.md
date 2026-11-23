@@ -1,9 +1,9 @@
 # PROGRESS
 
 ## Current status
-- **Active phase:** Phase 0 complete; Phase 1 (model) not started
-- **Done:** environment + GPU check; dataset download + inspection; group split, window index, Dataset
-- **Next task:** Phase 1 (encoder, projectors, action encoder, predictor)
+- **Active phase:** Phase 1 complete; Phase 2 (SIGReg and loss) not started
+- **Done:** Phase 0 (data); Phase 1 (model)
+- **Next task:** Phase 2 (SIGReg, loss)
 - **Blockers:** none
 
 ## Decisions
@@ -13,15 +13,18 @@ One line per decision: what was chosen, and why.
 |---|---|---|---|---|---|
 | 0a | Dataset source | HF dataset repo `quentinll/lewm-pusht`, file `pusht_expert_train.h5.zst` (~13.1 GB, zstd-compressed HDF5, MIT) | Owner | Official dataset release for the paper's PushT task | 2026-11-23 |
 | 0b | Evaluation simulator source | (i) the `swm/PushT-v1` Gymnasium env from `stable-worldmodel` (galilai-group), used only for environment validation and downstream evaluation. None of the library's models, training code, dataset loaders, planning solvers or CEM are used; all LeWM components, including the data loader, are written in this repo | Owner | Most likely to render frames matching the dataset; its documented state and proprio layout matches the HDF5 file | 2026-11-23 |
-| — | Train/val split unit | 90/10 split by **starting-state group** (185 groups × 101 episodes), seed 3072, made before windowing; held-out eval and probe sets also respect group boundaries | Owner ([PROJECT DECISION]; ratio [OFFICIAL-REFERENCE]) | Sibling episodes share their first frame and closely related early trajectories, so an episode-level split would leak | 2026-11-23 |
+| — | Train/val split unit | 90/10 split by **starting-state group** (185 groups × 101 episodes), seed 3072, made before windowing; held-out eval and probe sets also respect group boundaries | Owner ([PROJECT DECISION]; ratio [OFFICIAL-REFERENCE]) | Chosen over a random episode-level split, which would leak: the 101 sibling episodes in a group share their first frame and closely related early trajectories, so val would contain near-copies of training data. Splitting by group means val tests unseen starting states | 2026-11-23 |
 | — | Group id | `group = episode // 101`; val = first 19 of `default_rng(3072).permutation(185)`, train = remaining 166; saved to `configs/splits/pusht_group_split.json` | [PROJECT DECISION] | Follows the verified contiguous 185 × 101 layout; asserted on load | 2026-11-23 |
 | — | Action scaling in the Dataset | Dataset returns raw actions; standardization (PLAN default) is applied in Phase 3 | [PROJECT DECISION] | Keeps the loader a pure row reader; stats come from train groups only | 2026-11-23 |
+| — | Weight init | trunc-normal std 0.02 for Linear/Conv/pos-emb/CLS, zero biases, adaLN modulation zero-init | [PROJECT DECISION] | Paper silent; standard ViT/DiT init | 2026-11-24 |
+| — | Predictor dropout | 0.1 on the attention output and MLP output inside each residual branch; none in the encoder | [PROJECT DECISION] | Paper gives the rate only | 2026-11-24 |
+| — | Predictor final norm | plain LayerNorm (no adaLN) before the projector; adaLN-Zero (shift, scale, gate) in each of the 6 blocks | [PROJECT DECISION] | Paper: "AdaLN applied at each layer" | 2026-11-24 |
 | 9 | Window stride | OPEN until the 50-step timing check at the start of Phase 3 | Owner | 1-step stride gives ≈15.5k steps/epoch; 5-step stride gives ≈3.2k | |
 | — | Python / PyTorch | Python 3.12 (uv-managed), torch 2.11.0+cu128 from the PyTorch cu128 wheel index | [PROJECT DECISION] | cu128 wheels include sm_120 (Blackwell); 3.12 has broad wheel availability | 2026-11-23 |
 
 ## Phase checklist
 - [x] Phase 0: data
-- [ ] Phase 1: model
+- [x] Phase 1: model
 - [ ] Phase 2: SIGReg and loss
 - [ ] Phase 3: training (smoke run, stride decision, 10-epoch run)
 - [ ] Phase 4: evaluation (probes, planning, optional surprise)
@@ -76,6 +79,19 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-24 — Phase 1: model
+- `src/lewm/model.py`:
+  - ViT-Tiny/14 encoder: Conv2d patchify, CLS, 257 learned position embeddings, 12 pre-norm blocks, final LN, CLS → BN projector.
+  - Action encoder: MLP 10→192→192.
+  - Predictor: 6 adaLN-Zero causal blocks (16×64 heads, MLP 2048, dropout 0.1), 3 learned positions, final LN → projector.
+  - `LeWM.encode` normalizes uint8 frames on device; `forward` returns emb (B,4,192) and pred (B,3,192). a3 is not fed to the predictor.
+- Parameter counts (`uv run python -m lewm.model`): encoder 6.29M (5.49M ViT + 0.79M projector; the paper's "~5M" is the ViT), predictor 11.60M (incl. 0.79M projector; paper "~10M"), action encoder 0.04M.
+- Earlier action-block and data questions settled (2026-11-24): the action file has no NaNs (0 of 2,336,736 rows, including last rows), so no fix is needed. `group = episode // 101` was re-verified directly (identical first state within each block, min 14.3 between blocks, 185 unique). a3 is kept in samples per App. D ("4 frames and 4 blocks of 5 actions") but is unused by the loss.
+- Causality test bugs (in the test, not the model):
+  1. Perturbing with a constant +1.0 was erased by the final LayerNorm. Switched to random perturbations.
+  2. The "position 2 changes" cutoff of 1e-2 was arbitrary; the real change at init is ~3e-3. Lowered it to 1e-4, still well above float noise (~1e-7). Checked by hand that a non-causal predictor leaks ~6e-4 into positions 0–1, which `assert_close` rejects.
+- `uv run pytest -q`: 12 passed.
 
 ### 2026-11-23 — Stage 0.3: split, window index, Dataset (Phase 0 done)
 - `src/lewm/data/pusht.py`: `make_group_split`, `build_window_index(stride)`, and `PushTWindows`, which returns uint8 frames (4,3,224,224), raw actions (4,10), state (4,7) and `r0`. The h5 handle is opened lazily per worker.

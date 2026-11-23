@@ -6,11 +6,13 @@ Usage: uv run python scripts/check_gpu.py
 import sys
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 def main() -> int:
-    print(f"torch {torch.__version__} | CUDA build {torch.version.cuda} | cuDNN {torch.backends.cudnn.version()}")
+    print(
+        f"torch {torch.__version__} | CUDA build {torch.version.cuda} | cuDNN {torch.backends.cudnn.version()}"
+    )
     if not torch.cuda.is_available():
         print("FAIL: torch.cuda.is_available() is False")
         return 1
@@ -18,7 +20,9 @@ def main() -> int:
     dev = torch.device("cuda:0")
     props = torch.cuda.get_device_properties(dev)
     cap = torch.cuda.get_device_capability(dev)
-    print(f"device: {props.name} | capability sm_{cap[0]}{cap[1]} | memory {props.total_memory / 2**30:.2f} GiB")
+    print(
+        f"device: {props.name} | capability sm_{cap[0]}{cap[1]} | memory {props.total_memory / 2**30:.2f} GiB"
+    )
     print(f"arch list in build: {torch.cuda.get_arch_list()}")
     print(f"bf16 supported: {torch.cuda.is_bf16_supported()}")
 
@@ -40,7 +44,9 @@ def main() -> int:
         and torch.isfinite(y).all().item()
         and torch.isfinite(lin.weight.grad).all().item()
     )
-    print(f"autocast matmul dtype {c.dtype}, linear out dtype {y.dtype}, grad dtype {lin.weight.grad.dtype}")
+    print(
+        f"autocast matmul dtype {c.dtype}, linear out dtype {y.dtype}, grad dtype {lin.weight.grad.dtype}"
+    )
     print(f"loss {loss.item():.4f} | all finite: {ok}")
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
