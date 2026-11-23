@@ -38,7 +38,10 @@ If a paper-defined setting conflicts with an official-reference setting, use the
 - **[PAPER] PushT predictor history length:** 3 (Appendix D, p. 18).
 - **[PAPER] Prediction target:** one-step-ahead latent prediction with teacher forcing (Section 3.1, p. 5; Algorithm 3, p. 17).
 - **[OFFICIAL-REFERENCE] `num_preds`:** 1. This matches the paper's one-step-ahead prediction objective.
-- **[OFFICIAL-REFERENCE] Train/validation split:** 90% training (`train_split: 0.9`). The paper does not specify this split ratio. Split by episode before creating windows to avoid the same episode leaking across train and validation; this episode-level splitting is a project choice and must be recorded.
+- **[OFFICIAL-REFERENCE] Train/validation split:** 90% training (`train_split: 0.9`). The paper does not specify this split ratio.
+- **[OWNER DECISION, 2026-11-23] Split unit: starting-state group, not single episode.** The file holds 185 distinct initial states, each shared by 101 episodes in a contiguous block. Sibling episodes share their first frame and closely related early trajectories, so an episode-level split would leak across train and validation.
+  - Split the 185 groups 90/10 with seed 3072 **before** creating windows.
+  - Every downstream held-out set (planning-evaluation pairs, probe validation/test) must also respect group boundaries.
 - **[OFFICIAL-REFERENCE] Initial seed:** 3072. Use this for the first reproducible run; choose and record additional distinct seeds for the multi-seed stretch goal.
 
 **Sequence alignment must be explicit and tested.**
@@ -195,7 +198,7 @@ Keep a rolling context of the three most recent observations/latent embeddings r
   | Block location | 0.986 |
   | Block angle | 0.902 |
 
-- Keep train/validation/test separation at the episode level so adjacent frames from one trajectory do not leak across splits. This is a project evaluation safeguard; document the precise split because the paper does not fully specify it in the main text.
+- Keep train/validation/test separation at the starting-state-group level (see Section 3.1), so frames from one trajectory or its sibling episodes do not leak across splits. This is a project evaluation safeguard; document the precise split because the paper does not fully specify it in the main text.
 
 **Violation-of-expectation / surprise [PAPER]:**
 
@@ -215,11 +218,13 @@ The paper and the owner-supplied reference configuration do not settle every low
      - It holds a single file, `pusht_expert_train.h5.zst`: about 13.1 GB, a zstd-compressed HDF5 file.
      - The repo page does not document the keys, image resolution, or episode count. Phase 0 must find these out by inspecting the file.
      - **Warning:** a *model* repo with the same name (`quentinll/lewm-pusht`) holds the official pretrained checkpoint. Always download with the dataset repo type, e.g. `--repo-type dataset`, and never download or load the model repo.
-   - **0b. Evaluation simulator: OPEN. Owner decision needed before Phase 6** (and before the Phase 0 rendering comparison). The simulator must render frames that match this dataset. The options are:
+   - **0b. Evaluation simulator: DECIDED by the owner (2026-11-23).** The simulator must render frames that match this dataset. The options were:
      - **(i)** The PushT environment from the LeWM authors' benchmark library. This most likely matches the dataset, but it ships alongside the LeWM code, so it falls under the data/environment-only exception in `CLAUDE.md`.
      - **(ii)** Another PushT implementation, such as DINO-WM's environment. You would have to check that its rendering, action scaling, and state layout match the dataset.
 
-     Record the choice here: `Decision 0b: ________`. Claude must not pick this itself.
+     `Decision 0b: (i)`. Use the PushT Gymnasium environment (`swm/PushT-v1`) from the `stable-worldmodel` library (galilai-group).
+     - **Environment only.** It is used for environment validation (the simulator-vs-dataset render comparison) and for downstream evaluation (planning/MPC rollouts, surprise-experiment trajectories). Training does not need it.
+     - **Nothing else from the library.** Do **not** use its model implementations, training code, dataset-loading utilities, planning solvers, or CEM implementation. Every LeWM component, including the data loader, is implemented independently in this repository.
 1. Exact scheduler arguments: warmup duration, minimum learning rate, and whether the schedule is parameterized by epochs or optimizer steps.
 2. Exact Conv1D action-encoder channel widths, kernel size, padding, and MLP details. The adopted high-level method is Conv1D + MLP; do not look up the official code for missing details.
 3. Epps–Pulley scale details: the width of the weighting function, whether a factor of 2 is included for integrating only over positive t, and confirmation that no sample-size factor N is applied (see Section 3.4).
@@ -228,7 +233,7 @@ The paper and the owner-supplied reference configuration do not settle every low
 6. CEM covariance: diagonal, per Algorithm 2's per-element variance (Section 3.6). Only revisit with owner approval.
 7. Exact environment success predicate and any simulator-specific details needed to reproduce the PushT evaluation.
 8. Exact probe MLP architecture and probe optimization settings, which are not specified in the main paper description.
-9. Window stride for sampling training windows (every environment step or every 5). This defines what "10 epochs" costs (Section 3.1).
+9. Window stride for sampling training windows (every environment step or every 5). This defines what "10 epochs" costs (Section 3.1). The owner keeps this open until stage 0.3, when loader throughput will have been measured.
 10. AdaLN form: shift/scale only, or DiT-style adaLN-Zero with residual gates (Section 3.3).
 11. Source split and fixed file for the 50 evaluation start/goal pairs (Section 3.7).
 12. Surprise-experiment details: perturbation timestep, episode length, and how the random policy is biased toward the block (Section 3.7).
@@ -241,11 +246,18 @@ Do not turn these into broad hyperparameter searches. Choose the simplest defens
 
 **Tasks**
 
-- The dataset source is decided (decision 0a). The simulator source (decision 0b) is still open: ask the owner before installing any simulator.
-- Create the repository structure, Python environment, dependencies, and CUDA-enabled PyTorch installation.
-- **Download the dataset:** get `pusht_expert_train.h5.zst` from the **dataset** repo `quentinll/lewm-pusht` (repo type `dataset`, never the model repo of the same name) into a gitignored `data/` directory.
-- **Check disk space before decompressing:** check free disk space, and get the decompressed size from the zstd frame header if it is recorded there. Report both to the owner before decompressing, because a raw-pixel HDF5 file could be many times larger than 13.1 GB. If the decompressed file won't fit, stop and present the options.
-- **Inspect the HDF5 file:**
+#### Stage 0.1 — Environment and GPU: DONE (2026-11-23)
+
+- [x] Create the repository structure, Python environment, dependencies, and CUDA-enabled PyTorch installation.
+- [x] Verify the RTX 5070 Ti is visible to PyTorch and run a minimal CUDA/BF16 smoke test.
+- [x] Place the paper at `references/LeWorldModel.pdf`.
+
+#### Stage 0.2 — Dataset download and inspection: DONE (2026-11-23)
+
+- [x] The dataset source is decided (decision 0a). Ask the owner about the simulator source (decision 0b) before installing any simulator. Resolved: see Section 4, decision 0b.
+- [x] **Download the dataset:** get `pusht_expert_train.h5.zst` from the **dataset** repo `quentinll/lewm-pusht` (repo type `dataset`, never the model repo of the same name) into a gitignored `data/` directory.
+- [x] **Check disk space before decompressing:** check free disk space, and get the decompressed size from the zstd frame header if it is recorded there. Report both to the owner before decompressing, because a raw-pixel HDF5 file could be many times larger than 13.1 GB. If the decompressed file won't fit, stop and present the options.
+- [x] **Inspect the HDF5 file:**
   - its groups, keys, shapes, and dtypes
   - its chunking and internal compression
   - how it marks episode boundaries
@@ -253,15 +265,16 @@ Do not turn these into broad hyperparameter searches. Choose the simplest defens
   - its image resolution
 
   Write this up as a short data-format note in `docs/PROGRESS.md`.
-- Verify the RTX 5070 Ti is visible to PyTorch and run a minimal CUDA/BF16 smoke test.
-- Place the paper at `references/LeWorldModel.pdf`.
-- Download the PushT expert dataset and inspect its actual format, source image resolution, action shape, episode boundaries, timestamps, and metadata/labels.
-- Implement a dataset inspection tool that reports episode count, trajectory lengths, image dimensions, action dimensions, and storage size.
-- Implement an episode-level 90/10 train/validation split using the [OFFICIAL-REFERENCE] ratio, then construct 4-frame/4-action-block samples with frameskip 5.
-- Verify temporal alignment between frames, action blocks, and state labels. Save visualized sample trajectories and tensor-shape reports.
-- Set up the PushT simulator for evaluation. Compare a simulator-rendered frame with the dataset frame for the same environment state; investigate rendering differences rather than assuming exact pixel identity.
-- Resolve the open settings needed before training (Section 4, decisions 1–5, 9, 10): scheduler arguments, action encoder internals, SIGReg numerical details, SIGReg direction sampling, action normalization, window stride, AdaLN form, and data preprocessing.
-- Create initial configs: `configs/smoke.yaml` and `configs/pusht.yaml`. Keep the full config paper-faithful.
+- [x] Download the PushT expert dataset and inspect its actual format, source image resolution, action shape, episode boundaries, timestamps, and metadata/labels. The file has no timestamps or metadata attrs; per-episode step order is given by `step_idx`.
+- [x] Implement a dataset inspection tool that reports episode count, trajectory lengths, image dimensions, action dimensions, and storage size.
+
+#### Remaining (stage 0.3 onward): not started
+
+- [ ] Implement a 90/10 train/validation split by starting-state group (owner decision; see Section 3.1) using the [OFFICIAL-REFERENCE] ratio, then construct 4-frame/4-action-block samples with frameskip 5.
+- [ ] Verify temporal alignment between frames, action blocks, and state labels. Save visualized sample trajectories and tensor-shape reports.
+- [ ] Set up the PushT simulator for evaluation. Compare a simulator-rendered frame with the dataset frame for the same environment state; investigate rendering differences rather than assuming exact pixel identity.
+- [ ] Resolve the open settings needed before training (Section 4, decisions 1–5, 9, 10): scheduler arguments, action encoder internals, SIGReg numerical details, SIGReg direction sampling, action normalization, window stride, AdaLN form, and data preprocessing.
+- [ ] Create initial configs: `configs/smoke.yaml` and `configs/pusht.yaml`. Keep the full config paper-faithful.
 
 **Done when**
 

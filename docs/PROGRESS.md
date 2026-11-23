@@ -3,8 +3,8 @@
 ## Current status
 - **Active phase:** Phase 0 (environment, data, and evaluation simulator)
 - **Stages done:** 0.1 (environment + GPU smoke test), 0.2 (dataset download + inspection)
-- **Next task:** owner review of the data findings (episode count/length mismatch, 185×101 group structure → split unit), then plan stage 0.3 (loader, split, windows, alignment tests, throughput)
-- **Blockers:** exact package name/install source for the decision-0b simulator (needed before stage 0.4)
+- **Next task:** plan stage 0.3 (our own HDF5 loader, group-level split, 4-frame / 4-block windows, alignment tests, throughput measurement, then a window-stride decision)
+- **Blockers:** none
 
 ## Decisions
 Record each decision from PLAN.md Section 4 as it is resolved: number, choice, provenance ([PAPER] / [OFFICIAL-REFERENCE] / [PROJECT DECISION]), rationale, date.
@@ -12,7 +12,9 @@ Record each decision from PLAN.md Section 4 as it is resolved: number, choice, p
 | # | Decision | Choice | Provenance | Rationale | Date |
 |---|---|---|---|---|---|
 | 0a | Dataset source | HF dataset repo `quentinll/lewm-pusht`, file `pusht_expert_train.h5.zst` (~13.1 GB, zstd-compressed HDF5, MIT) | Owner | Official dataset release for the paper's PushT task | 2026-11-23 |
-| 0b | Evaluation simulator source | (i) PushT env from the LeWM authors' benchmark library, used for the environment only; exact package source pending from owner | Owner | Most likely to render frames matching the dataset | 2026-11-23 |
+| 0b | Evaluation simulator source | (i) the `swm/PushT-v1` Gymnasium env from `stable-worldmodel` (galilai-group), used only for environment validation and downstream evaluation. None of the library's models, training code, dataset loaders, planning solvers or CEM are used; all LeWM components, including the data loader, are written in this repo | Owner | Most likely to render frames matching the dataset; its documented state and proprio layout matches the HDF5 file | 2026-11-23 |
+| — | Train/val split unit | 90/10 split by **starting-state group** (185 groups × 101 episodes), seed 3072, made before windowing; held-out eval and probe sets also respect group boundaries | Owner ([PROJECT DECISION]; ratio [OFFICIAL-REFERENCE]) | Sibling episodes share their first frame and closely related early trajectories, so an episode-level split would leak | 2026-11-23 |
+| 9 | Window stride | OPEN until stage 0.3, after loader throughput is measured | Owner | 1-step stride gives ≈15.5k steps/epoch; 5-step stride gives ≈3.2k | |
 | — | Python / PyTorch | Python 3.12 (uv-managed), torch 2.11.0+cu128 from the PyTorch cu128 wheel index | [PROJECT DECISION] | cu128 wheels include sm_120 (Blackwell); 3.12 has broad wheel availability | 2026-11-23 |
 
 ## Phase checklist
@@ -31,7 +33,7 @@ Record each decision from PLAN.md Section 4 as it is resolved: number, choice, p
 |---|---|---|---|---|---|---|---|
 
 ## Deviations from the paper
-(none yet)
+- **Dataset size (known, accepted by owner 2026-11-23).** The released `pusht_expert_train.h5` has **18,685 episodes with a mean length of 125.06 steps** (2,336,736 steps). Appendix E, p. 18, describes 20,000 episodes averaging 196 steps. The cause is unknown: 198 × 101 = 19,998 ≈ 20,000 suggests some starting-state groups may have been held out, but this is unverified. We use the file as released, with no resampling or padding to match the paper.
 
 ## Data format note (verified 2026-11-23)
 Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm-pusht`. 13,136,247,974 B compressed, 46,300,921,856 B decompressed; zstd checksum verified on decompression. Local paths: `data/raw/…zst`, `data/pusht_expert_train.h5` (both gitignored). Inspector: `uv run python -m lewm.data.inspect --path data/pusht_expert_train.h5 --out outputs/inspect/`.
@@ -75,6 +77,19 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-23 — Owner decisions after stage 0.2
+- Committed stages 0.1–0.2 (`7e96193`). That commit left out `src/lewm/data/` because the unanchored `.gitignore` pattern `data/` also matched it. Fixed by anchoring the patterns to the repo root (`/data/`, `/outputs/`, …) and committing the missing package (`178a5a9`). `git check-ignore` confirms `data/*.h5` and `outputs/` are still ignored.
+- Decisions recorded above:
+  - 0b → stable-worldmodel `swm/PushT-v1`, env only
+  - split by starting-state group
+  - dataset size recorded as a deviation
+  - decision 9 left open until stage 0.3
+- Read only the stable-worldmodel data and env documentation (PyPI page, README, dataset-API and PushT env pages); no source code was read. Facts from the env docs to verify after installation:
+  - action space `Box(-1, 1, (2,))`, whereas dataset actions reach −1.50 and +2.04 (relevant to decision 5)
+  - success = agent+block position error < 20 px and angle error < π/9 (decision 7)
+  - no documented reset-to-exact-state API
+  - default render size 224×224
 
 ### 2026-11-23 — Stage 0.2: dataset download and inspection
 - Downloaded `pusht_expert_train.h5.zst` with `hf download … --repo-type dataset`; the command exited with code 0. `zstd -lv` reported 43.1 GiB decompressed against 351 GiB free. The owner approved decompression, which took 57 s and verified the checksum.
