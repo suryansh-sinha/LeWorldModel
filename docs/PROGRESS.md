@@ -1,32 +1,31 @@
 # PROGRESS
 
 ## Current status
-- **Active phase:** Phase 0 (environment, data, and evaluation simulator)
-- **Stages done:** 0.1 (environment + GPU smoke test), 0.2 (dataset download + inspection)
-- **Next task:** plan stage 0.3 (our own HDF5 loader, group-level split, 4-frame / 4-block windows, alignment tests, throughput measurement, then a window-stride decision)
+- **Active phase:** Phase 0 complete; Phase 1 (model) not started
+- **Done:** environment + GPU check; dataset download + inspection; group split, window index, Dataset
+- **Next task:** Phase 1 (encoder, projectors, action encoder, predictor)
 - **Blockers:** none
 
 ## Decisions
-Record each decision from PLAN.md Section 4 as it is resolved: number, choice, provenance ([PAPER] / [OFFICIAL-REFERENCE] / [PROJECT DECISION]), rationale, date.
+One line per decision: what was chosen, and why.
 
 | # | Decision | Choice | Provenance | Rationale | Date |
 |---|---|---|---|---|---|
 | 0a | Dataset source | HF dataset repo `quentinll/lewm-pusht`, file `pusht_expert_train.h5.zst` (~13.1 GB, zstd-compressed HDF5, MIT) | Owner | Official dataset release for the paper's PushT task | 2026-11-23 |
 | 0b | Evaluation simulator source | (i) the `swm/PushT-v1` Gymnasium env from `stable-worldmodel` (galilai-group), used only for environment validation and downstream evaluation. None of the library's models, training code, dataset loaders, planning solvers or CEM are used; all LeWM components, including the data loader, are written in this repo | Owner | Most likely to render frames matching the dataset; its documented state and proprio layout matches the HDF5 file | 2026-11-23 |
 | — | Train/val split unit | 90/10 split by **starting-state group** (185 groups × 101 episodes), seed 3072, made before windowing; held-out eval and probe sets also respect group boundaries | Owner ([PROJECT DECISION]; ratio [OFFICIAL-REFERENCE]) | Sibling episodes share their first frame and closely related early trajectories, so an episode-level split would leak | 2026-11-23 |
-| 9 | Window stride | OPEN until stage 0.3, after loader throughput is measured | Owner | 1-step stride gives ≈15.5k steps/epoch; 5-step stride gives ≈3.2k | |
+| — | Group id | `group = episode // 101`; val = first 19 of `default_rng(3072).permutation(185)`, train = remaining 166; saved to `configs/splits/pusht_group_split.json` | [PROJECT DECISION] | Follows the verified contiguous 185 × 101 layout; asserted on load | 2026-11-23 |
+| — | Action scaling in the Dataset | Dataset returns raw actions; standardization (PLAN default) is applied in Phase 3 | [PROJECT DECISION] | Keeps the loader a pure row reader; stats come from train groups only | 2026-11-23 |
+| 9 | Window stride | OPEN until the 50-step timing check at the start of Phase 3 | Owner | 1-step stride gives ≈15.5k steps/epoch; 5-step stride gives ≈3.2k | |
 | — | Python / PyTorch | Python 3.12 (uv-managed), torch 2.11.0+cu128 from the PyTorch cu128 wheel index | [PROJECT DECISION] | cu128 wheels include sm_120 (Blackwell); 3.12 has broad wheel availability | 2026-11-23 |
 
 ## Phase checklist
-- [ ] Phase 0: environment, data, simulator
-- [ ] Phase 1: encoder, projectors, action encoder, predictor
-- [ ] Phase 2: SIGReg
-- [ ] Phase 3: training loop and smoke training
-- [ ] Phase 4: 10-epoch training run
-- [ ] Phase 5: probing
-- [ ] Phase 6: CEM planner and MPC evaluation
-- [ ] Phase 7: surprise evaluation
-- [ ] Phase 8: additional seeds and write-up (stretch)
+- [x] Phase 0: data
+- [ ] Phase 1: model
+- [ ] Phase 2: SIGReg and loss
+- [ ] Phase 3: training (smoke run, stride decision, 10-epoch run)
+- [ ] Phase 4: evaluation (probes, planning, optional surprise)
+- [ ] Stretch: λ = 0 run, more seeds, README
 
 ## Experiments
 | Run ID | Config | Seed | Git hash | Runtime | Peak VRAM | Key results | Artifacts |
@@ -77,6 +76,16 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-23 — Stage 0.3: split, window index, Dataset (Phase 0 done)
+- `src/lewm/data/pusht.py`: `make_group_split`, `build_window_index(stride)`, and `PushTWindows`, which returns uint8 frames (4,3,224,224), raw actions (4,10), state (4,7) and `r0`. The h5 handle is opened lazily per worker.
+- Window counts: stride 1 gives train 1,772,146 / val 209,575; stride 5 gives train 361,479 / val 42,723. The totals match the inspection numbers.
+- Grid `outputs/windows/windows_grid.png` (3 train and 3 val windows): the agent xy from `state` (scaled 224/512) lands on the blue agent in every frame, and frames advance 5 steps with consistent motion.
+- `tests/test_pusht_data.py`:
+  - split sizes, disjointness and determinism, plus a match with the committed JSON
+  - the stride-1 total = 1,981,721, no window crosses an episode, and no val episode appears in train
+  - element-wise frame/action/state equality against direct h5 reads for the first, last and a middle window in both splits
+- No problems found. `uv run pytest -q`: 9 passed.
 
 ### 2026-11-23 — Owner decisions after stage 0.2
 - Committed stages 0.1–0.2 (`7e96193`). That commit left out `src/lewm/data/` because the unanchored `.gitignore` pattern `data/` also matched it. Fixed by anchoring the patterns to the repo root (`/data/`, `/outputs/`, …) and committing the missing package (`178a5a9`). `git check-ignore` confirms `data/*.h5` and `outputs/` are still ignored.
