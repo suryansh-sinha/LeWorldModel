@@ -81,10 +81,12 @@ class PushTWindows(Dataset):
         if self._f is None:
             self._f = h5py.File(self.h5_path, "r")
         r0 = int(self.index[i])
-        rows = [r0 + FRAMESKIP * k for k in range(NUM_FRAMES)]
-        frames = torch.from_numpy(self._f["pixels"][rows]).permute(0, 3, 1, 2)
-        actions = torch.from_numpy(self._f["action"][r0 : r0 + WINDOW].reshape(NUM_FRAMES, -1))
-        state = torch.from_numpy(self._f["state"][rows])
+        # Rows r0, r0+5, r0+10, r0+15. Read the contiguous span r0:r0+16 and subsample: h5py's list
+        # (point) indexing on the Blosc-chunked pixels was ~27x slower for the same frames.
+        span = slice(r0, r0 + (NUM_FRAMES - 1) * FRAMESKIP + 1)
+        frames = torch.from_numpy(self._f["pixels"][span][::FRAMESKIP].copy()).permute(0, 3, 1, 2)  # (4, 3, 224, 224)
+        actions = torch.from_numpy(self._f["action"][r0 : r0 + WINDOW].reshape(NUM_FRAMES, -1))      # (4, 10)
+        state = torch.from_numpy(self._f["state"][span][::FRAMESKIP].copy())                          # (4, 7)
         return {"frames": frames, "actions": actions, "state": state, "r0": r0}
 
 

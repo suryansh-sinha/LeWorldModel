@@ -1,9 +1,9 @@
 # PROGRESS
 
 ## Current status
-- **Active phase:** Phase 2 complete; Phase 3 (training) not started
+- **Active phase:** Phase 3 (training). Loop, smoke run, resume and timing check done; loader sped up 2×
 - **Done:** Phase 0 (data); Phase 1 (model); Phase 2 (SIGReg and loss)
-- **Next task:** Phase 3 (training loop, smoke run, 50-step timing check, stride decision)
+- **Next task:** full 10-epoch run at stride 5 (decision 9)
 - **Blockers:** none
 
 ## Decisions
@@ -23,7 +23,12 @@ One line per decision: what was chosen, and why.
 | — | SIGReg batch scaling | **No ×N factor** (mean ECF, not the classical N·T Epps–Pulley statistic) | Owner (PLAN default) | Conventionally the EP test is scaled by N so that its null value is O(1). Unscaled, the value for Gaussian embeddings is a ~1/N noise floor, but for non-Gaussian ones it converges to the true distance, so the regularizer does not weaken with batch size. Measured (192-d, unscaled, half range): N(0.5, I) 0.071→0.056 and N(0, 0.25I) 0.081→0.076 for N = 32→8192; all-zeros fixed at 0.204; N(0, I) × N ≈ 0.5. ×N at B = 128 would act like λ = 12.8. **Revisit first if training collapses or SIGReg seems too weak** | 2026-11-24 |
 | — | SIGReg weight | w(t) = exp(−t²/2) (paper's width parameter = 1) | [PROJECT DECISION] | Paper gives the form, not the width | 2026-11-24 |
 | — | SIGReg directions | 1024 fresh directions per step, shared by the 4 time steps within a step | [PROJECT DECISION] | Paper silent on sharing; simplest | 2026-11-24 |
-| 9 | Window stride | OPEN until the 50-step timing check at the start of Phase 3 | Owner | 1-step stride gives ≈15.5k steps/epoch; 5-step stride gives ≈3.2k | |
+| 9 | Window stride | **Stride 5** for the full run (2,824 train steps/epoch, 28,240 total, ≈ 1.8 h at 4.40 it/s) | Owner | Fits the time available; stride 1 (13,845 steps/epoch, ≈ 8.7 h) can be revisited later. Each window still holds 4 frames 5 steps apart; stride only sets how often windows start | 2026-11-24 |
+| — | Dataset frame reads | Read the contiguous rows `r0:r0+16`, then keep every 5th (`[::5]`), instead of h5py list indexing `pixels[[r0, r0+5, r0+10, r0+15]]` | Owner | Identical frames (equality test), but 27× faster in one process (33 → 909 windows/s), and the DataLoader goes from 2.5 to 15.4 batches/s with 12 workers. Training becomes GPU-bound | 2026-11-24 |
+| — | AdamW weight decay | 1e-3 on all parameters, including biases and norms | [PROJECT DECISION] | Paper silent; wd is tiny | 2026-11-24 |
+| — | Action standardization | Per-dimension mean/std over all action rows of train-group episodes (mean ≈ [−0.0072, 0.0060], std ≈ [0.2106, 0.2059]), applied on the GPU, saved in every checkpoint | [PROJECT DECISION] (PLAN default) | Planning in Phase 4 needs the same scaling | 2026-11-24 |
+| — | Checkpoints / resume | Saved at epoch end (`epoch_k.pt` + `last.pt`; smoke keeps only `last.pt`); `--resume` continues from the next epoch. Per-epoch data order is seeded with `seed + epoch` | [PROJECT DECISION] | Simplest; a crash loses at most part of one epoch | 2026-11-24 |
+| — | Validation loss | Every epoch, on 20 fixed val-group batches (2,560 windows, seeded), in eval mode | Owner | Spots overfitting over the 10 epochs | 2026-11-24 |
 | — | Python / PyTorch | Python 3.12 (uv-managed), torch 2.11.0+cu128 from the PyTorch cu128 wheel index | [PROJECT DECISION] | cu128 wheels include sm_120 (Blackwell); 3.12 has broad wheel availability | 2026-11-23 |
 
 ## Phase checklist
@@ -83,6 +88,28 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-24 — Phase 3 (in progress): training loop, smoke run, loader fix
+- **Code:**
+  - `src/lewm/train.py`: AdamW 5e-5 / wd 1e-3, clip 1.0, bf16 autocast, 5% warmup + cosine to 0, wandb (online), per-epoch val loss and checkpoint, `--resume`, `--max_steps`, `--stride`.
+  - `configs/pusht.yaml` and `configs/smoke.yaml`.
+  - `lewm_loss` now also returns `emb_std`.
+  - `wandb` added to the dependencies.
+- **Smoke run** (1,024 fixed train windows, 400 steps):
+  - Train pred_loss 0.169 → 0.014. emb_std stays at 0.26–0.35, SIGReg ≈ 0.30, and the LR schedule ends at 0.
+  - Resume test: interrupted after epoch 19, then `--resume` continued at epoch 20, step 160, with the LR continuing exactly on the cosine.
+- **Val emb_std near 0 early on (not a bug):**
+  - Val emb_std was 0.001–0.01 for the first ~5 epochs, while train emb_std was 0.28.
+  - Root cause: before the projector's BatchNorm, the encoder's CLS output barely varies across images at init (variance ≈ 3e-6). Train-mode BN uses batch stats, which hides this. Eval mode uses running_var, which starts at 1 and decays as 0.9^step, so eval outputs come out ~30× too small (running_var 0.0025 at step 56).
+  - It catches up after ~120 steps (val emb_std 0.35 by step 120). Irrelevant for the full run.
+- **Loader bottleneck, found and fixed:**
+  - The first 50-step check gave 2.22 it/s with ≈50% data wait.
+  - Root cause: h5py list indexing of 4 rows on the Blosc-chunked `pixels` (33 windows/s in one process). Reading the contiguous `r0:r0+16` slice and keeping `[::5]` gives identical frames at 909 windows/s. A larger chunk cache made no difference.
+  - Measured: DataLoader 2.5 → 15.4 batches/s (12 workers); the GPU-only step on a synthetic batch is 4.47 it/s.
+  - After the fix, the 100-step check on full data gives **4.40 it/s, 0% data wait, peak VRAM 11.21 GiB**. The smoke run trains the same (final pred_loss 0.0136 vs 0.0146).
+- **Logging bug, fixed:** the it/s and wait timers were reset at every epoch start, so on smoke (8 steps/epoch, logging every 25) they read 12–43 it/s. They now reset only at each logging point.
+- **Ctrl-C note:** SIGINT left the process hanging during DataLoader/wandb shutdown; SIGTERM was needed. `last.pt` was intact.
+- `uv run pytest -q`: 16 passed.
 
 ### 2026-11-24 — Phase 2: SIGReg and loss
 - `src/lewm/loss.py`:
