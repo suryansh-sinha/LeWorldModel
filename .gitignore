@@ -1,9 +1,9 @@
 # Data, checkpoints, experiment outputs (never commit)
-data/
-checkpoints/
-runs/
-wandb/
-outputs/
+/data/
+/checkpoints/
+/runs/
+/wandb/
+/outputs/
 *.h5
 *.hdf5
 *.zst
