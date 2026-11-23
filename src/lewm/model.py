@@ -29,10 +29,14 @@ class Attention(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, N, dim)   N = tokens (257 in the encoder, T <= 3 in the predictor)
         B, N, _ = x.shape
-        q, k, v = self.qkv(x).view(B, N, 3, self.heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)
-        return self.drop(self.out(y.transpose(1, 2).reshape(B, N, -1)))
+        qkv = self.qkv(x)                                          # (B, N, 3*H*hd)
+        qkv = qkv.view(B, N, 3, self.heads, self.head_dim)         # (B, N, 3, H, hd)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4)                       # each (B, H, N, hd)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=self.causal)  # (B, H, N, hd)
+        y = y.transpose(1, 2).reshape(B, N, -1)                    # (B, N, H*hd)
+        return self.drop(self.out(y))                              # (B, N, dim)
 
 
 class MLP(nn.Module):
@@ -42,6 +46,7 @@ class MLP(nn.Module):
         self.drop = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # (..., dim) -> fc1 -> (..., hidden) -> fc2 -> (..., dim)
         return self.drop(self.fc2(F.gelu(self.fc1(x))))
 
 
@@ -53,9 +58,10 @@ class Projector(nn.Module):
         self.fc1, self.bn, self.fc2 = nn.Linear(dim, hidden), nn.BatchNorm1d(hidden), nn.Linear(hidden, dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        shape = x.shape
-        x = x.reshape(-1, shape[-1])
-        return self.fc2(F.gelu(self.bn(self.fc1(x)))).reshape(shape)
+        shape = x.shape                        # (..., 192), e.g. (B*T, 192) or (B, T, 192)
+        x = x.reshape(-1, shape[-1])           # (M, 192)   BatchNorm1d needs 2-D input
+        x = F.gelu(self.bn(self.fc1(x)))       # (M, 2048)  BN statistics over all M rows
+        return self.fc2(x).reshape(shape)      # (M, 192) -> (..., 192)
 
 
 # ---------------------------------------------------------------- encoder
@@ -70,6 +76,7 @@ class Block(nn.Module):
         self.mlp = MLP(dim, mlp)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (N, 257, 192) throughout; both residual branches keep the shape
         x = x + self.attn(self.norm1(x))
         return x + self.mlp(self.norm2(x))
 
@@ -91,11 +98,16 @@ class Encoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: float images (N, 3, H, W), already normalized -> z (N, D)."""
-        x = self.patch_embed(x).flatten(2).transpose(1, 2)
-        x = torch.cat([self.cls.expand(len(x), -1, -1), x], dim=1) + self.pos
+        # N = number of images (B*T when called from LeWM.encode)
+        x = self.patch_embed(x)                # (N, 3, 224, 224) -> (N, 192, 16, 16)
+        x = x.flatten(2).transpose(1, 2)       # (N, 256, 192)   one token per 14x14 patch
+        cls = self.cls.expand(len(x), -1, -1)  # (N, 1, 192)
+        x = torch.cat([cls, x], dim=1)         # (N, 257, 192)   CLS first
+        x = x + self.pos                       # (N, 257, 192)   + (1, 257, 192)
         for blk in self.blocks:
-            x = blk(x)
-        return self.proj(self.norm(x)[:, 0])
+            x = blk(x)                         # (N, 257, 192)
+        x = self.norm(x)[:, 0]                 # (N, 192)        CLS token only
+        return self.proj(x)                    # (N, 192)
 
 
 # ---------------------------------------------------------------- actions + predictor
@@ -109,6 +121,7 @@ class ActionEncoder(nn.Module):
         self.apply(_init_weights)
 
     def forward(self, a: torch.Tensor) -> torch.Tensor:
+        # a: (B, T, 10) -> fc1 -> (B, T, 192) -> fc2 -> (B, T, 192)
         return self.fc2(F.gelu(self.fc1(a)))
 
 
@@ -124,9 +137,13 @@ class AdaLNBlock(nn.Module):
         self.ada = nn.Linear(dim, 6 * dim)
 
     def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
-        sh1, sc1, g1, sh2, sc2, g2 = self.ada(F.silu(c)).chunk(6, dim=-1)
-        x = x + g1 * self.attn(self.norm1(x) * (1 + sc1) + sh1)
-        return x + g2 * self.mlp(self.norm2(x) * (1 + sc2) + sh2)
+        # x: (B, T, 192) tokens, c: (B, T, 192) encoded action for each position
+        mod = self.ada(F.silu(c))                            # (B, T, 6*192)
+        sh1, sc1, g1, sh2, sc2, g2 = mod.chunk(6, dim=-1)    # each (B, T, 192)
+        h = self.norm1(x) * (1 + sc1) + sh1                  # (B, T, 192)
+        x = x + g1 * self.attn(h)                            # (B, T, 192)  attn inner width 16*64 = 1024
+        h = self.norm2(x) * (1 + sc2) + sh2                  # (B, T, 192)
+        return x + g2 * self.mlp(h)                          # (B, T, 192)  MLP hidden 2048
 
 
 class Predictor(nn.Module):
@@ -147,10 +164,10 @@ class Predictor(nn.Module):
 
     def forward(self, z: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
         """z: (B, T, D) embeddings, c: (B, T, D) encoded actions, T <= max_len -> (B, T, D)."""
-        x = z + self.pos[:, : z.shape[1]]
+        x = z + self.pos[:, : z.shape[1]]      # (B, T, 192) + (1, T, 192)
         for blk in self.blocks:
-            x = blk(x, c)
-        return self.proj(self.norm(x))
+            x = blk(x, c)                      # (B, T, 192)
+        return self.proj(self.norm(x))         # (B, T, 192)  output t predicts the embedding at t+1
 
 
 # ---------------------------------------------------------------- full model
@@ -165,18 +182,21 @@ class LeWM(nn.Module):
     def encode(self, frames: torch.Tensor) -> torch.Tensor:
         """frames: uint8 (B, T, 3, H, W) -> emb (B, T, D)."""
         B, T = frames.shape[:2]
-        x = (frames.flatten(0, 1).float() / 255.0 - 0.5) / 0.5
-        return self.encoder(x).view(B, T, -1)
+        x = frames.flatten(0, 1)               # (B*T, 3, 224, 224) uint8
+        x = (x.float() / 255.0 - 0.5) / 0.5    # (B*T, 3, 224, 224) float in [-1, 1]
+        z = self.encoder(x)                    # (B*T, 192)
+        return z.view(B, T, -1)                # (B, T, 192)
 
     def predict(self, emb: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """emb: (B, T, D), actions: (B, T, 10) -> predicted next embeddings (B, T, D)."""
-        return self.predictor(emb, self.action_encoder(actions))
+        c = self.action_encoder(actions)       # (B, T, 10) -> (B, T, 192)
+        return self.predictor(emb, c)          # (B, T, 192)
 
     def forward(self, frames: torch.Tensor, actions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """frames (B, 4, ...), actions (B, 4, 10) -> emb (B, 4, D), pred (B, 3, D). Block a3 is unused."""
-        emb = self.encode(frames)
-        pred = self.predict(emb[:, :-1], actions[:, :-1])
-        return emb, pred
+        emb = self.encode(frames)                          # (B, 4, 192)
+        pred = self.predict(emb[:, :-1], actions[:, :-1])  # (B, 3, 192) from frames 0-2 + blocks a0-a2
+        return emb, pred                                   # pred[:, t] targets emb[:, t+1]
 
 
 def count_params(m: nn.Module) -> int:

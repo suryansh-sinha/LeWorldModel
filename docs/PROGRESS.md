@@ -1,9 +1,9 @@
 # PROGRESS
 
 ## Current status
-- **Active phase:** Phase 1 complete; Phase 2 (SIGReg and loss) not started
-- **Done:** Phase 0 (data); Phase 1 (model)
-- **Next task:** Phase 2 (SIGReg, loss)
+- **Active phase:** Phase 2 complete; Phase 3 (training) not started
+- **Done:** Phase 0 (data); Phase 1 (model); Phase 2 (SIGReg and loss)
+- **Next task:** Phase 3 (training loop, smoke run, 50-step timing check, stride decision)
 - **Blockers:** none
 
 ## Decisions
@@ -19,13 +19,17 @@ One line per decision: what was chosen, and why.
 | — | Weight init | trunc-normal std 0.02 for Linear/Conv/pos-emb/CLS, zero biases, adaLN modulation zero-init | [PROJECT DECISION] | Paper silent; standard ViT/DiT init | 2026-11-24 |
 | — | Predictor dropout | 0.1 on the attention output and MLP output inside each residual branch; none in the encoder | [PROJECT DECISION] | Paper gives the rate only | 2026-11-24 |
 | — | Predictor final norm | plain LayerNorm (no adaLN) before the projector; adaLN-Zero (shift, scale, gate) in each of the 6 blocks | [PROJECT DECISION] | Paper: "AdaLN applied at each layer" | 2026-11-24 |
+| — | SIGReg integration range | Full ℝ: 2 × trapezoid over [0.2, 4] (the EP integrand is even in t) | Owner | App. A defines the EP integral over all of ℝ; the quadrature on [0.2, 4] covers t > 0 only, so ×2 recovers the full range. Initially implemented without the ×2 (half range), changed by owner 2026-11-24 | 2026-11-24 |
+| — | SIGReg batch scaling | **No ×N factor** (mean ECF, not the classical N·T Epps–Pulley statistic) | Owner (PLAN default) | Conventionally the EP test is scaled by N so that its null value is O(1). Unscaled, the value for Gaussian embeddings is a ~1/N noise floor, but for non-Gaussian ones it converges to the true distance, so the regularizer does not weaken with batch size. Measured (192-d, unscaled, half range): N(0.5, I) 0.071→0.056 and N(0, 0.25I) 0.081→0.076 for N = 32→8192; all-zeros fixed at 0.204; N(0, I) × N ≈ 0.5. ×N at B = 128 would act like λ = 12.8. **Revisit first if training collapses or SIGReg seems too weak** | 2026-11-24 |
+| — | SIGReg weight | w(t) = exp(−t²/2) (paper's width parameter = 1) | [PROJECT DECISION] | Paper gives the form, not the width | 2026-11-24 |
+| — | SIGReg directions | 1024 fresh directions per step, shared by the 4 time steps within a step | [PROJECT DECISION] | Paper silent on sharing; simplest | 2026-11-24 |
 | 9 | Window stride | OPEN until the 50-step timing check at the start of Phase 3 | Owner | 1-step stride gives ≈15.5k steps/epoch; 5-step stride gives ≈3.2k | |
 | — | Python / PyTorch | Python 3.12 (uv-managed), torch 2.11.0+cu128 from the PyTorch cu128 wheel index | [PROJECT DECISION] | cu128 wheels include sm_120 (Blackwell); 3.12 has broad wheel availability | 2026-11-23 |
 
 ## Phase checklist
 - [x] Phase 0: data
 - [x] Phase 1: model
-- [ ] Phase 2: SIGReg and loss
+- [x] Phase 2: SIGReg and loss
 - [ ] Phase 3: training (smoke run, stride decision, 10-epoch run)
 - [ ] Phase 4: evaluation (probes, planning, optional surprise)
 - [ ] Stretch: λ = 0 run, more seeds, README
@@ -79,6 +83,19 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-24 — Phase 2: SIGReg and loss
+- `src/lewm/loss.py`:
+  - `sigreg(z)`: input (T, N, D), forced to FP32 with autocast off. It uses 1024 unit directions and the ECF on 17 knots in [0.2, 4], weighted by exp(−t²/2), integrated with the trapezoid rule, then averaged over directions and time steps.
+  - `lewm_loss`: `mse(pred, emb[:, 1:]) + 0.1·sigreg(emb)`, with no stop-gradient.
+- `tests/test_loss.py`:
+  - SIGReg values (N = 1024, full range): N(0, I) 1.08e-3, zeros 0.409, constant 0.778, N(3, I) 1.39. (Half range, before the owner's ×2 change, gave exactly half of these.)
+  - The all-zeros value matches the closed-form trapezoid of (1 − e^{−t²/2})²·e^{−t²/2}.
+  - The output is FP32 under bf16 autocast.
+  - Every parameter gets a finite gradient, and the encoder and adaLN layers get nonzero ones. Predictor attn/MLP and the action encoder correctly get zero gradients at step 0 because of adaLN-Zero gates.
+  - Perturbing a3 leaves the loss bit-identical.
+- Also added shape comments to `model.py` (no behavior change).
+- No problems found. `uv run pytest -q`: 16 passed.
 
 ### 2026-11-24 — Phase 1: model
 - `src/lewm/model.py`:
