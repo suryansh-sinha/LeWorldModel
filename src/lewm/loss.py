@@ -33,8 +33,9 @@ def sigreg(z: torch.Tensor, num_dirs: int = NUM_DIRS, generator: torch.Generator
 
 def lewm_loss(model, frames: torch.Tensor, actions: torch.Tensor, lam: float = 0.1,
               generator: torch.Generator | None = None) -> dict:
-    """frames uint8 (B, 4, 3, H, W), actions (B, 4, 10) -> dict(loss, pred_loss, sigreg)."""
+    """frames uint8 (B, 4, 3, H, W), actions (B, 4, 10) -> dict(loss, pred_loss, sigreg, emb_std)."""
     emb, pred = model(frames, actions)                    # (B, 4, D), (B, 3, D)
     pred_loss = F.mse_loss(pred.float(), emb[:, 1:].float())  # no stop-gradient on the target
     sig = sigreg(emb.transpose(0, 1), generator=generator)    # (4, B, D) -> scalar
-    return {"loss": pred_loss + lam * sig, "pred_loss": pred_loss, "sigreg": sig}
+    emb_std = emb.detach().float().std(dim=0).mean()          # per-dim std over the batch; collapse -> 0
+    return {"loss": pred_loss + lam * sig, "pred_loss": pred_loss, "sigreg": sig, "emb_std": emb_std}
