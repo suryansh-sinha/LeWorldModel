@@ -1,0 +1,36 @@
+[project]
+name = "lewm"
+version = "0.1.0"
+description = "From-scratch PyTorch reimplementation of LeWorldModel (LeWM) on PushT"
+requires-python = "==3.12.*"
+dependencies = [
+    "torch>=2.7",
+    "numpy",
+    "h5py",
+    "hdf5plugin",
+    "pyyaml",
+    "matplotlib",
+    "huggingface_hub",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lewm"]
+
+# CUDA-enabled PyTorch wheels (Blackwell sm_120 needs CUDA >= 12.8 builds).
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
