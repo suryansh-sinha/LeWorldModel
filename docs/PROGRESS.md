@@ -51,6 +51,9 @@ One line per decision: what was chosen, and why.
 ## Experiments
 | Run ID | Config | Seed | Git hash | Runtime | Peak VRAM | Key results | Artifacts |
 |---|---|---|---|---|---|---|---|
+| ablate_arch2_noimnet (wandb `e8zerg4r`) | v2 with **only ImageNet normalization reverted** (predictor qkv_bias=False, pos init std 1.0, affine encoder LN eps 1e-12), 1 epoch, stride 2 | 0 | uncommitted (on top of `f77235a`) | ≈ 24 min | — | Final val pred 0.0606, SIGReg 3.37; train rank 34. Rollout rel. error median 0.366; dev-pair single plan **6/50**; CEM final pos err median 78 px, angle 0.196 rad | `outputs/runs/ablate_arch2_noimnet/`, `outputs/runs/ablate_arch2_noimnet_compare.txt` |
+| ablate_arch2_noimnet_qkvb (wandb `g9ip79l3`) | v2 with **ImageNet normalization and predictor qkv_bias=False reverted** (keeps affine encoder LN eps 1e-12 and pos init std 1.0), 1 epoch, stride 2 | 0 | uncommitted (on top of `f77235a`) | ≈ 24 min | — | Final val pred 0.0635, SIGReg 3.51; train rank 34. Rollout rel. error median 0.419; dev-pair single plan **5/50**; CEM final pos err median 80 px | `outputs/runs/ablate_arch2_noimnet_qkvb/`, `outputs/runs/ablate_arch2_noimnet_qkvb_compare.txt` |
+| ablate_arch2_pos002 (wandb `js2g6mtm`) | as ablate_arch2 but predictor pos init **trunc-normal 0.02** (v1 value) | 0 | uncommitted (on top of `f77235a`) | ≈ 24 min | — | Final val pred 0.083, SIGReg 3.79; train rank 32. Rollout rel. error median 0.555; dev-pair single plan **4/50**; CEM final pos err median 160 px | `outputs/runs/ablate_arch2_pos002/`, `outputs/runs/ablate_arch2_pos002_compare.txt` |
 | ablate_arch2 (wandb `yv4r1yx2`) | pusht.yaml, **architecture v2** (owner: affine encoder LN eps 1e-12, predictor qkv_bias off, predictor pos init std 1.0, ImageNet input normalization), BN projector, 1 epoch (6,951 steps), stride 2 | 0 | uncommitted (on top of `b717f2d`) | ≈ 24 min | 11.21 GiB | Final val pred 0.082, SIGReg 3.87; train rank 31. Rollout rel. error median 0.499; dev-pair single plan **0/50**; CEM final pos err median 142 px | `outputs/runs/ablate_arch2/`, `outputs/runs/ablate_arch2_compare.txt` |
 | ablate_proj_ln (wandb `7eokm9kc`) | pusht.yaml, new architecture, **LN projector**, 1 epoch (6,951 steps), stride 2 | 0 | uncommitted (on top of `f3eeb04`) | ≈ 23 min | 11.22 GiB | Stalled near zero scale for ≈ 1k steps (emb_std 0.001, SIGReg 51). Final val pred 0.345, SIGReg 4.41; train rank 19. Rollout rel. error median 0.693; dev-pair single plan **0/50**; CEM final pos err median 229 px | `outputs/runs/ablate_proj_ln/`, `outputs/runs/ablate_proj_ln_compare.txt` |
 | ablate_proj_bn (wandb `1v0pn3bf`) | same, **BN projector** | 0 | uncommitted (on top of `f3eeb04`) | ≈ 23 min | 11.21 GiB | Final val pred 0.061, SIGReg 3.28; train rank 36. Rollout rel. error median 0.376; dev-pair single plan **9/50**; CEM final pos err median 84 px | `outputs/runs/ablate_proj_bn/`, `outputs/runs/ablate_proj_bn_compare.txt` |
@@ -107,6 +110,48 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-25 — ImageNet normalization was the culprit (v3 = v2 without it)
+- Owner's hypothesis: ImageNet normalization caused the v2 gap. Test: put predictor `qkv_bias=False` back and keep ImageNet normalization removed. This model (**v3**) = v2 minus ImageNet normalization: affine encoder LN eps 1e-12, predictor qkv_bias off, pos init std 1.0, inputs (x/255 − 0.5)/0.5.
+
+  | Metric | v1 | v2 | v2 − ImageNet − no-qkv-bias | **v3** (v2 − ImageNet) |
+  |---|---|---|---|---|
+  | Val pred loss / SIGReg | 0.061 / 3.28 | 0.082 / 3.87 | 0.0635 / 3.51 | **0.0606 / 3.37** |
+  | Train pred loss at steps 3k / 5k / 6.95k | 0.067 / 0.049 / 0.050 | 0.083 / 0.069 / 0.066 | 0.067 / 0.051 / 0.050 | **0.065 / 0.049 / 0.047** |
+  | Train effective rank (end) | 36 | 31 | 34 | 34 |
+  | 5-block rollout error, relative, median | 0.376 | 0.499 | 0.419 | **0.366** |
+  | Dev-pair single-plan success | 9/50 | 0/50 | 5/50 | 6/50 |
+  | CEM final pos err / angle, median | 84 px / 0.255 | 142 px / 0.312 | 80 px / 0.255 | **78 px / 0.196** |
+
+- **Confirmed:** with ImageNet normalization removed, the missing qkv bias doesn't hurt; v3 matches v1 at every logged step and on val loss and rollout error. ImageNet normalization alone caused the v2 gap. Not tested: why (the dataset frames are synthetic PushT renders, not ImageNet-like images, and the encoder trains from scratch, so there is no pretrained reason to use those statistics).
+- v3 vs v1 is a tie at 1 epoch: val loss and rollout error equal within noise; dev 6/50 vs 9/50 within noise (SD of the difference ≈ 3.5).
+
+### 2026-11-25 — v2 with ImageNet normalization and qkv_bias=False reverted: back to v1's level
+- Owner: restore the pos init to v2's std 1.0 (the 0.02 revert made no difference), and revert two changes together: ImageNet input normalization (back to (x/255 − 0.5)/0.5) and predictor `qkv_bias=False` (back to bias on). The only v2 changes left are the affine encoder LN (eps 1e-12) and the pos init std 1.0.
+
+  | Metric | v1 | v2 | v2, pos 0.02 | v2 − ImageNet − no-qkv-bias |
+  |---|---|---|---|---|
+  | Val pred loss / SIGReg | 0.061 / 3.28 | 0.082 / 3.87 | 0.083 / 3.79 | **0.0635 / 3.51** |
+  | Train pred loss at steps 3k / 5k / 6.95k | 0.067 / 0.049 / 0.050 | 0.083 / 0.069 / 0.066 | 0.081 / 0.068 / 0.067 | **0.067 / 0.051 / 0.050** |
+  | Train effective rank (end) | 36 | 31 | 32 | **34** |
+  | 5-block rollout error, relative, median | 0.376 | 0.499 | 0.555 | **0.419** |
+  | Dev-pair single-plan success | 9/50 | 0/50 | 4/50 | **5/50** |
+  | CEM final pos err, median | 84 px | 142 px | 160 px | **80 px** |
+
+- **The v2 gap came from ImageNet normalization and/or the missing qkv bias**; with both reverted the training curve matches v1 at every logged step. These two were reverted together, so which one (or both) is responsible isn't separated.
+- The remaining v2 changes (affine encoder LN eps 1e-12, pos init 1.0) are roughly neutral at 1 epoch: slightly behind v1 on val loss (0.0635 vs 0.061) and rollout (0.419 vs 0.376); dev 5/50 vs 9/50 is within noise at n = 50 (SD of the difference between two such counts ≈ 3.5).
+
+### 2026-11-24 — v2 with the position init reverted to 0.02: no change
+- Only the predictor position init changed back (normal 1.0 → trunc-normal 0.02); the other three v2 changes stay. Same 1-epoch stride-2 setup.
+
+  | Metric | v1 | v2 (pos 1.0) | v2, pos 0.02 |
+  |---|---|---|---|
+  | Val pred loss / SIGReg | **0.061 / 3.28** | 0.082 / 3.87 | 0.083 / 3.79 |
+  | Train effective rank (end) | **36** | 31 | 32 |
+  | 5-block rollout error, relative, median | **0.376** | 0.499 | 0.555 |
+  | Dev-pair single-plan success | **9/50** | 0/50 | 4/50 |
+
+- Training curves tracked v2 within noise at every logged step. **The position init is not the cause** of v2's gap. The remaining suspects are the affine encoder LN (eps 1e-12), predictor qkv_bias off, and ImageNet input normalization.
 
 ### 2026-11-24 — Architecture v2 (owner), 1-epoch check: negative result, worse than v1
 - **Owner's changes on top of `b717f2d`:** encoder block LayerNorms affine with eps 1e-12; predictor `qkv_bias=False`; predictor position embedding init N(0, 1) instead of trunc-normal 0.02 (owner confirmed intended); ImageNet mean/std input normalization (buffers `image_mean`/`image_std`). One fix by me: `encode` read `self.img_mean`/`img_std`, which don't exist (every test failed); renamed to the registered buffers. 19 tests pass; 18.03M params. Old checkpoints don't load (new buffers and LN params).

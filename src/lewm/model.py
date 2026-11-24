@@ -239,15 +239,11 @@ class LeWM(nn.Module):
         self.action_encoder = ActionEncoder()
         self.predictor = Predictor()
 
-        # ImageNet normalization
-        self.register_buffer("image_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
-        self.register_buffer("image_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
-
     def encode(self, frames: torch.Tensor) -> torch.Tensor:
         """frames: uint8 (B, T, 3, H, W) -> emb (B, T, D)."""
         B, T = frames.shape[:2]
-        x = frames.flatten(0, 1).float() / 255.0  # (B*T, 3, 224, 224) float in [0, 1]
-        x = (x - self.image_mean) / self.image_std  # (B*T, 3, 224, 224) ImageNet-normalized, roughly [-2.1, 2.6]
+        x = frames.flatten(0, 1)  # (B*T, 3, 224, 224) uint8
+        x = (x.float() / 255.0 - 0.5) / 0.5  # (B*T, 3, 224, 224) float in [-1, 1]
         z = self.encoder(x)  # (B*T, 192)
         return z.view(B, T, -1)  # (B, T, 192)
 
