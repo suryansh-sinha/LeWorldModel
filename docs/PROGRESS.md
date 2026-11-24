@@ -1,9 +1,9 @@
 # PROGRESS
 
 ## Current status
-- **Active phase:** Phase 4 (evaluation). 4a probes and 4b planning done; best model `pusht_s2` plans at 82% (paper 96%)
+- **Active phase:** Phase 4 (evaluation), final runs. v3 stride 2 (`pusht_v3_s2`) done: 84% val pairs, 90% random pairs (paper 96%)
 - **Done:** Phase 0 (data); Phase 1 (model); Phase 2 (SIGReg and loss); Phase 3 (training, full 10-epoch run)
-- **Next task:** owner decides: stride-1 retrain (≈ 8.5 h), other changes, or close Phase 4 at 82%
+- **Next task:** v3 stride-1 run (`configs/pusht_v3_s1.yaml`, ≈ 8 h) for the paper comparison, on the owner's go
 - **Blockers:** none
 
 ## Decisions
@@ -51,6 +51,7 @@ One line per decision: what was chosen, and why.
 ## Experiments
 | Run ID | Config | Seed | Git hash | Runtime | Peak VRAM | Key results | Artifacts |
 |---|---|---|---|---|---|---|---|
+| pusht_v3_s2 (wandb `ktuu0fz5`) + plan + probes | `configs/pusht_v3_s2.yaml` (architecture v3, stride 2, ×N, λ 0.09, t ∈ [0, 3]), 69,510 steps; `lewm.plan` val and `--split random` | 0 | uncommitted (on top of `652f38d`) | ≈ 3 h 57 min (≈ 4.9 it/s) | 11.21 GiB | **Planning: val pairs 42/50 = 84% (95% CI 74–94%), random pairs 45/50 = 90% (82–98%)**; plan time 0.33 s. Final val (eval mode): pred 0.0177, SIGReg 2.33, emb_std 0.96; train effective rank 73. Probe effective rank 65.7. Probe r (lin/MLP), random split: agent 0.992/1.000, block 0.994/1.000, angle 0.937/0.988; group split: agent 0.969/0.986, block 0.967/0.984, angle 0.808/0.905. Rollout rel. error median 0.062; dev-pair single plan 42/50 | `outputs/runs/pusht_v3_s2/`, `outputs/eval/pusht_v3_s2{,_random}/`, `outputs/runs/pusht_v3_s2_compare.txt` |
 | ablate_arch2_noimnet (wandb `e8zerg4r`) | v2 with **only ImageNet normalization reverted** (predictor qkv_bias=False, pos init std 1.0, affine encoder LN eps 1e-12), 1 epoch, stride 2 | 0 | uncommitted (on top of `f77235a`) | ≈ 24 min | — | Final val pred 0.0606, SIGReg 3.37; train rank 34. Rollout rel. error median 0.366; dev-pair single plan **6/50**; CEM final pos err median 78 px, angle 0.196 rad | `outputs/runs/ablate_arch2_noimnet/`, `outputs/runs/ablate_arch2_noimnet_compare.txt` |
 | ablate_arch2_noimnet_qkvb (wandb `g9ip79l3`) | v2 with **ImageNet normalization and predictor qkv_bias=False reverted** (keeps affine encoder LN eps 1e-12 and pos init std 1.0), 1 epoch, stride 2 | 0 | uncommitted (on top of `f77235a`) | ≈ 24 min | — | Final val pred 0.0635, SIGReg 3.51; train rank 34. Rollout rel. error median 0.419; dev-pair single plan **5/50**; CEM final pos err median 80 px | `outputs/runs/ablate_arch2_noimnet_qkvb/`, `outputs/runs/ablate_arch2_noimnet_qkvb_compare.txt` |
 | ablate_arch2_pos002 (wandb `js2g6mtm`) | as ablate_arch2 but predictor pos init **trunc-normal 0.02** (v1 value) | 0 | uncommitted (on top of `f77235a`) | ≈ 24 min | — | Final val pred 0.083, SIGReg 3.79; train rank 32. Rollout rel. error median 0.555; dev-pair single plan **4/50**; CEM final pos err median 160 px | `outputs/runs/ablate_arch2_pos002/`, `outputs/runs/ablate_arch2_pos002_compare.txt` |
@@ -110,6 +111,27 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-25 — Final run 1: v3 at stride 2 vs the old architecture (`pusht_s2`)
+- **Setup:** same as `pusht_s2` except the architecture (v3, `652f38d`): stride 2, 10 epochs, λ 0.09, t ∈ [0, 3], ×N, seed 0. New configs `configs/pusht_v3_s{2,1}.yaml` so `pusht.yaml`'s `out_dir` (the old run) isn't overwritten. Training was clean: no NaNs, val pred fell every epoch (0.0582 → 0.0177).
+
+  | Metric | `pusht_s2` (v1) | **`pusht_v3_s2`** |
+  |---|---|---|
+  | Planning, val pairs | 41/50 = 82% (71–93%) | **42/50 = 84% (74–94%)** |
+  | Planning, random pairs | 38/50 = 76% (64–88%) | **45/50 = 90% (82–98%)** |
+  | Plan time | 0.35 s | 0.33 s |
+  | Final val pred / SIGReg | 0.0177 / 2.20 | 0.0177 / 2.33 |
+  | Effective rank (train end / probe frames) | 77 / 69.7 | 73 / 65.7 |
+  | Probe r random split, lin (agent / block / angle) | 0.986 / 0.989 / 0.914 | **0.992 / 0.994 / 0.937** |
+  | Probe r group split, lin | 0.930 / 0.930 / 0.718 | **0.969 / 0.967 / 0.808** |
+  | Probe r group split, MLP | 0.980 / 0.975 / 0.858 | **0.986 / 0.984 / 0.905** |
+  | Dev-pair single plan | 42/50 | 42/50 |
+  | 5-block rollout error, relative, median | 0.049 | 0.062 |
+
+- **Paired comparison (same pairs):** val pairs: 36 both, 5 old only, 6 new only → a tie. Random pairs: 38 both, 0 old only, 7 new only (exact McNemar p ≈ 0.016) → v3 is better there.
+- **Probes improved most on the group split** (unseen starting states): block linear r 0.930 → 0.967, angle 0.718 → 0.808.
+- **Caveats:** one seed. The old dev/rollout numbers came from the earlier scratch script (`compare_ckpt.py` was rebuilt from it), so the rollout row is approximate; v3's rollout error is slightly higher there despite better planning.
+- Still below the paper's 96% on both splits. Next: stride 1.
 
 ### 2026-11-25 — ImageNet normalization was the culprit (v3 = v2 without it)
 - Owner's hypothesis: ImageNet normalization caused the v2 gap. Test: put predictor `qkv_bias=False` back and keep ImageNet normalization removed. This model (**v3**) = v2 minus ImageNet normalization: affine encoder LN eps 1e-12, predictor qkv_bias off, pos init std 1.0, inputs (x/255 − 0.5)/0.5.

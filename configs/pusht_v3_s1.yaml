@@ -1,0 +1,17 @@
+# Final v3 run (652f38d architecture), stride 1. Epochs 10, batch 128 (fixed). lam 0.09, SIGReg t in [0, 3], xN per owner.
+h5_path: data/pusht_expert_train.h5
+stride: 1
+epochs: 10
+batch_size: 128
+lam: 0.09             # owner 2026-11-24: authors' value (paper text says 0.1)
+lr: 5.0e-5
+weight_decay: 1.0e-3
+grad_clip: 1.0
+warmup_frac: 0.05
+num_workers: 12
+seed: 0
+val_batches: 20
+keep_epoch_ckpts: true
+out_dir: outputs/runs/pusht_v3_s1
+wandb: {project: lewm, mode: online}
+sigreg_scale_n: true  # owner 2026-11-24: conventional N*T Epps-Pulley statistic; without it the embedding collapsed (see PROGRESS.md)
