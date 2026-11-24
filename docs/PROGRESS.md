@@ -20,6 +20,7 @@ One line per decision: what was chosen, and why.
 | — | Predictor dropout | 0.1 on the attention output and MLP output inside each residual branch; none in the encoder | [PROJECT DECISION] | Paper gives the rate only | 2026-11-24 |
 | — | Predictor final norm | plain LayerNorm (no adaLN) before the projector; adaLN-Zero (shift, scale, gate) in each of the 6 blocks | [PROJECT DECISION] | Paper: "AdaLN applied at each layer" | 2026-11-24 |
 | — | SIGReg integration range | Full ℝ: 2 × trapezoid over [0.2, 4] (the EP integrand is even in t) | Owner | App. A defines the EP integral over all of ℝ; the quadrature on [0.2, 4] covers t > 0 only, so ×2 recovers the full range. Initially implemented without the ×2 (half range), changed by owner 2026-11-24 | 2026-11-24 |
+| — | Inner LayerNorm in Attention/MLP | Flags `inner_norm` and `qkv_bias` on `Attention`/`MLP`/blocks. **Encoder: inner_norm off; predictor: inner_norm on** (a second LN inside attention and MLP, after the block's adaLN-modulated pre-norm). qkv_bias on everywhere | Owner, to match what the owner reports the authors do | Conscious choice: the second LN re-normalizes after the adaLN shift/scale and may weaken action conditioning (differs from DiT adaLN-Zero). Revisit by flipping the flag and comparing | 2026-11-24 |
 | — | SIGReg knots and λ (revised) | **t ∈ [0, 3]** (17 knots, ×2 for the full real line, ×N unchanged) and **λ = 0.09**, from the stride-2 run on | Owner, stated as the authors' actual values | Overrides the CLAUDE.md fixed settings (17 knots on [0.2, 4], λ = 0.1) and differs from the paper's text (App. A p. 13: [0.2, 4]; Algorithm 3: λ = 0.1). Runs up to `pusht_scaleN` used [0.2, 4] and λ = 0.1. The t = 0 knot always contributes 0 (ECF(0) = φ₀(0) = 1) | 2026-11-24 |
 | — | SIGReg batch scaling | **×N (N = batch size 128): the conventional N·T Epps–Pulley statistic**, via `sigreg_scale_n: true` in `configs/pusht.yaml`. Supersedes the original "no ×N" choice (2026-11-24), which follows App. A's formula literally | Owner | The first 10-epoch run without ×N trained "fine" by its metrics, but the probes showed **representational (dimensional) collapse**: effective rank of z ≈ 3/192, probe r ≈ 0.5–0.6. A 1-epoch ablation confirmed the cause: effective rank 1.0 without ×N vs 25.5 with ×N; block MLP r 0.54 → 0.92. λ = 0.1 unchanged. See the Phase 4 log entry | 2026-11-24 |
 | — | SIGReg weight | w(t) = exp(−t²/2) (paper's width parameter = 1) | [PROJECT DECISION] | Paper gives the form, not the width | 2026-11-24 |
@@ -50,6 +51,8 @@ One line per decision: what was chosen, and why.
 ## Experiments
 | Run ID | Config | Seed | Git hash | Runtime | Peak VRAM | Key results | Artifacts |
 |---|---|---|---|---|---|---|---|
+| ablate_proj_ln (wandb `7eokm9kc`) | pusht.yaml, new architecture, **LN projector**, 1 epoch (6,951 steps), stride 2 | 0 | uncommitted (on top of `f3eeb04`) | ≈ 23 min | 11.22 GiB | Stalled near zero scale for ≈ 1k steps (emb_std 0.001, SIGReg 51). Final val pred 0.345, SIGReg 4.41; train rank 19. Rollout rel. error median 0.693; dev-pair single plan **0/50**; CEM final pos err median 229 px | `outputs/runs/ablate_proj_ln/`, `outputs/runs/ablate_proj_ln_compare.txt` |
+| ablate_proj_bn (wandb `1v0pn3bf`) | same, **BN projector** | 0 | uncommitted (on top of `f3eeb04`) | ≈ 23 min | 11.21 GiB | Final val pred 0.061, SIGReg 3.28; train rank 36. Rollout rel. error median 0.376; dev-pair single plan **9/50**; CEM final pos err median 84 px | `outputs/runs/ablate_proj_bn/`, `outputs/runs/ablate_proj_bn_compare.txt` |
 | plan_pusht_s2_random | `lewm.plan --split random`, same CEM and budget, 50 pairs from any episode (seed 0; 47 from train groups, 3 from val) | per-pair | uncommitted (on top of `8860f39`) | ≈ 1 min | — | **Success 38/50 = 76% (95% CI 64–88%)**; plan time 0.33 ± 0.06 s; 0 trivial starts | `configs/eval/pusht_eval_pairs_random.json`, `outputs/eval/pusht_s2_random/` |
 | pusht_s2 (wandb `j14cpwu4`) + plan + probes | `configs/pusht.yaml` (stride 2, ×N, λ 0.09, t ∈ [0, 3]), 69,510 steps; `lewm.plan` as above | 0 | uncommitted (on top of `aae0c73`) | ≈ 3 h 56 min (4.94 it/s) | 11.21 GiB | **Planning 41/50 = 82% (95% CI 71–93%)**, plan time 0.35 ± 0.05 s (64 plans). Final val (eval mode): pred 0.0177, SIGReg 2.20, emb_std 0.97; train effective rank 77. Probe effective rank 69.7. Probe r (lin/MLP), random split: agent 0.986/0.999, block 0.989/0.999, angle 0.914/0.986; group split: agent 0.930/0.980, block 0.930/0.975, angle 0.718/0.858 | `outputs/runs/pusht_s2/`, `outputs/eval/pusht_s2/` |
 | plan_pusht_scaleN | `lewm.plan`, CEM 300/30/30, H = 5, 50 pairs, budget 50 | per-pair | uncommitted (on top of `2b0cdf4`) | ≈ 1 min | — | **Success 30/50 = 60% (95% CI 46–74%)**; plan time 0.35 ± 0.05 s (78 plans); 0 trivial starts | `outputs/eval/plan_results.json`, `outputs/eval/gifs/` |
@@ -103,6 +106,32 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-24 — Ablation: a LayerNorm projector collapses under SIGReg; keep BatchNorm
+- **Setup:** new architecture (owner's changes, bug fixes, inner_norm off in encoder / on in predictor), stride 2, 1 epoch (6,951 steps, cosine over 1 epoch), λ 0.09, t ∈ [0, 3], ×N, seed 0. Only `projector` differs. Configs in `outputs/ablate_configs/`; comparison script `outputs/tools/compare_ckpt.py` (rebuilt from the earlier scratch script; dev pairs seed 1, 500 val windows).
+
+  | Metric | LN projector | BN projector |
+  |---|---|---|
+  | Val pred loss / SIGReg | 0.345 / 4.41 | **0.061 / 3.28** |
+  | Train effective rank (end) | 19 | **36** |
+  | Train grad norm (end) | 10.9 | 0.89 |
+  | 5-block rollout error, relative, median | 0.693 | **0.376** |
+  | Dev-pair single-plan success | 0/50 | **9/50** |
+  | CEM predicted vs real cost, median | 59 vs 272 | 10 vs 109 |
+
+- **LN failure mode:** for the first ≈ 1,000 steps the embeddings collapsed to emb_std ≈ 0.001 with SIGReg stuck at ≈ 51 (Gaussian null ≈ 1.05). It escaped at ≈ 2k steps but stayed far behind (val pred 5.7× higher, rank about half, 0/50 dev plans).
+- **Why (owner's explanation):** SIGReg is a population-level objective: it wants the distribution of embeddings across the batch to be N(0, I). BatchNorm normalizes across that same axis and has learnable per-feature scale/shift, so it gives the optimizer a direct handle on the population mean and variance SIGReg is trying to control. LayerNorm normalizes each sample independently, re-centering and re-scaling every embedding and undoing the population-level adjustments SIGReg attempts, so the regularizer's gradient is largely projected away. With LN as the last norm, SIGReg can't do its job and the prediction loss, whose trivial optimum is collapse, wins. A related effect: with tiny projections, cos(ht) ≈ 1 − h²t²/2, so SIGReg's push toward larger spread shrinks with the spread itself.
+- **Decision (owner):** the LayerNorm projector is removed; `Projector` is Linear → BatchNorm1d → GELU → Linear in both encoder and predictor, as in the paper. The `projector` switch is gone too, so `ablate_proj_ln/last.pt` no longer loads (its numbers above are final).
+- **Not answered here:** whether the new architecture beats the old one. Both arms are far below the old 10-epoch `pusht_s2` model (rollout 0.049, dev 42/50), but that's a 10× training difference. A 1-epoch old-architecture run would be the fair baseline.
+
+### 2026-11-24 — Architecture changes (owner) reviewed; projector ablation set up
+- **Owner's changes in `model.py`:** a LayerNorm projector (`Projector`, Linear → LN → GELU → Linear) next to the BatchNorm one (`ProjectorBN`); inner LayerNorm in `Attention` and `MLP`; attention-weight dropout in SDPA; new action encoder (1×1 Conv1d 10→10, then Linear 10→768, SiLU, Linear 768→192); non-affine pre-norms with eps 1e-6. 18.04M parameters.
+- **Two bugs found by the tests and fixed** (owner approved):
+  - `Attention` defaulted to `causal=True` and the encoder didn't override it. CLS sits at position 0, so it saw only itself: every image got the same embedding and the patch embedding got no gradient (`test_gradients_flow` failed). The encoder blocks now pass `causal=False`.
+  - SDPA's `dropout_p` was applied in eval mode too (SDPA ignores `model.eval()`); eval predictions varied by up to 7e-4 between identical calls (`test_predictor_causal` failed). Now `dropout_p = self.drop if self.training else 0.0`.
+- **Flags added:** `inner_norm` (LN or Identity) and `qkv_bias`; see the decision row. A `projector: ln | bn` switch was added for the ablation below, then removed with the LN projector.
+- **Old checkpoints** (`pusht`, `pusht_scaleN`, `pusht_s2`) don't load with this `model.py` (renamed and new parameters). To re-evaluate them use the model file from `f3eeb04`.
+- **Check:** 19 tests pass; a 56-step GPU run (BF16, real data) works for both projectors. The `--max_steps` timing report crashes on the smoke subset (8 batches/epoch, so the step-10 timer is never set); unrelated to the model, and normal runs don't use it.
 
 ### 2026-11-24 — Phase 4b: stride-2 model on random-split pairs (owner request)
 - **Why:** the owner asked for a re-evaluation on random-split pairs, as the paper likely did. The paper doesn't state where its planning pairs come from: p. 18 only says the setup "follows [18]", so this is our reading, matching the probes' "random" protocol.

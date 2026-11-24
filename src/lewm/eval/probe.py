@@ -94,8 +94,9 @@ def main() -> None:
         d = torch.load(cache)
         assert d["ckpt"] == args.ckpt and d["tr_groups"] == tr_groups
     else:
+        ck = torch.load(args.ckpt, map_location=device, weights_only=False)
         model = LeWM().to(device)
-        model.load_state_dict(torch.load(args.ckpt, map_location=device, weights_only=False)["model"])
+        model.load_state_dict(ck["model"])
         model.eval()
         ztr, str_ = embed_groups(model, args.h5, tr_groups, device)
         zte, ste = embed_groups(model, args.h5, te_groups, device)
