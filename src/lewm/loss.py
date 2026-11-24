@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 NUM_DIRS = 1024
 KNOTS = 17
-T_MIN, T_MAX = 0.2, 4.0
+T_MIN, T_MAX = 0.0, 3.0  # owner 2026-11-24: authors' values (paper text says [0.2, 4])
 
 
 def sigreg(z: torch.Tensor, num_dirs: int = NUM_DIRS, generator: torch.Generator | None = None,
@@ -27,14 +27,14 @@ def sigreg(z: torch.Tensor, num_dirs: int = NUM_DIRS, generator: torch.Generator
         re, im = torch.cos(x).mean(1), torch.sin(x).mean(1)                  # (T, M, K) empirical CF
         gauss = torch.exp(-0.5 * t**2)                                       # (K,) N(0,1) CF, also the weight
         err = ((re - gauss) ** 2 + im**2) * gauss                            # (T, M, K)
-        # The integrand is even in t, so the integral over all of R is 2x the [0.2, 4] quadrature.
+        # The integrand is even in t, so the integral over all of R is 2x the [T_MIN, T_MAX] quadrature.
         # scale_n=True gives the classical EP statistic N*T. The training config uses it: without it the
         # embedding collapsed to effective rank ~3/192 (see PROGRESS.md, Phase 4a).
         stat = 2.0 * torch.trapezoid(err, t, dim=-1)                         # (T, M)
         return stat.mean() * (z.shape[1] if scale_n else 1.0)
 
 
-def lewm_loss(model, frames: torch.Tensor, actions: torch.Tensor, lam: float = 0.1,
+def lewm_loss(model, frames: torch.Tensor, actions: torch.Tensor, lam: float = 0.09,
               generator: torch.Generator | None = None, sigreg_scale_n: bool = False) -> dict:
     """frames uint8 (B, 4, 3, H, W), actions (B, 4, 10) -> dict(loss, pred_loss, sigreg, emb_std)."""
     emb, pred = model(frames, actions)                    # (B, 4, D), (B, 3, D)

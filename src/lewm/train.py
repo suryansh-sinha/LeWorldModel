@@ -82,7 +82,7 @@ def main() -> None:
     cfg = yaml.safe_load(Path(args.config).read_text())
     if args.stride is not None:
         cfg["stride"] = args.stride
-    assert cfg["stride"] in (1, 5), "set stride (decision 9) in the config or with --stride"
+    assert isinstance(cfg["stride"], int) and cfg["stride"] >= 1, "set stride (decision 9) in the config or with --stride"
 
     torch.manual_seed(cfg["seed"])
     np.random.seed(cfg["seed"])

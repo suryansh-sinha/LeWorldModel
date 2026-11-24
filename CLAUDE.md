@@ -16,8 +16,17 @@ Keep it simple: get a correct model trained and evaluated. This is a learning pr
   Don't read or use the library's models, training code, data loaders, planners, or CEM.
 - **From scratch:** write the data loader, encoder, predictor, SIGReg, loss, training loop, probes, and CEM planner from torch primitives
   (`nn.Linear`, `nn.LayerNorm`, `F.scaled_dot_product_attention`, etc.). No timm or transformers model classes, and no pretrained weights.
-- **Fixed settings, never change them:** 10 epochs, batch size 128, λ = 0.1, 1024 SIGReg projections, 17 knots on [0.2, 4].
+- **Fixed settings, never change them:** 10 epochs, batch size 128, 1024 SIGReg projections, 17 knots.
   Also no stop-gradient, EMA, or reconstruction loss.
+- **SIGReg values: paper vs practice.** Use the "in practice" column. Change these only on the owner's instruction.
+
+  | Setting | Paper text | In practice (owner, 2026-11-24) |
+  |---|---|---|
+  | λ | 0.1 (Algorithm 3) | **0.09** (the authors' actual value) |
+  | Knot interval | [0.2, 4] (App. A) | **[0, 3]** (the authors' actual value) |
+  | Batch scaling | none (App. A formula) | **×N**, the conventional N·T statistic; without it the embedding collapsed |
+
+  Runs before `outputs/runs/pusht_s2` used λ = 0.1 and [0.2, 4]. Details are in the PROGRESS.md decisions.
 
 ## How we work
 - Do one phase at a time, and don't start the next phase on your own.

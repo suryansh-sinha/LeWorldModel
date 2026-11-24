@@ -49,10 +49,10 @@ Running three seeds is a stretch goal.
 - **SIGReg (App. A p. 13):** for each of the 4 time steps:
   - take the batch of embeddings (B, 192) and project it onto 1024 random unit directions
   - compute the Epps–Pulley statistic: the weighted squared distance between the empirical characteristic function and exp(−t²/2)
-  - integrate it with the trapezoid rule on 17 knots over [0.2, 4], using weight exp(−t²/2) (the paper doesn't give the weight's width, so this is our default), times 2 for the full real line (the integrand is even), with no ×N factor
+  - integrate it with the trapezoid rule on 17 knots over [0.2, 4] (owner 2026-11-24: now [0, 3], the authors' values), using weight exp(−t²/2) (the paper doesn't give the weight's width, so this is our default), times 2 for the full real line (the integrand is even), with no ×N factor
 
   Average over the directions and the 4 time steps.
-- `L = L_pred + 0.1 · SIGReg`.
+- `L = L_pred + 0.1 · SIGReg` (owner 2026-11-24: now λ = 0.09, the authors' value; SIGReg uses ×N).
 
 ### Optimizer
 - AdamW with learning rate 5e-5, weight decay 1e-3, and gradient clipping at 1.0. Train in BF16.

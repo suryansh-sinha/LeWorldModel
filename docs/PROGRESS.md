@@ -1,9 +1,9 @@
 # PROGRESS
 
 ## Current status
-- **Active phase:** Phase 4 (evaluation). 4a probes done on the ×N retrain; 4b (simulator, CEM) next
+- **Active phase:** Phase 4 (evaluation). 4a probes and 4b planning done; best model `pusht_s2` plans at 82% (paper 96%)
 - **Done:** Phase 0 (data); Phase 1 (model); Phase 2 (SIGReg and loss); Phase 3 (training, full 10-epoch run)
-- **Next task:** paused; the owner will decide the follow-up later. Diagnosis: model prediction error, not CEM, limits planning (candidate: retrain at stride 1; alternative: accept 60%) Checkpoint: `outputs/runs/pusht_scaleN/last.pt`
+- **Next task:** owner decides: stride-1 retrain (≈ 8.5 h), other changes, or close Phase 4 at 82%
 - **Blockers:** none
 
 ## Decisions
@@ -20,10 +20,11 @@ One line per decision: what was chosen, and why.
 | — | Predictor dropout | 0.1 on the attention output and MLP output inside each residual branch; none in the encoder | [PROJECT DECISION] | Paper gives the rate only | 2026-11-24 |
 | — | Predictor final norm | plain LayerNorm (no adaLN) before the projector; adaLN-Zero (shift, scale, gate) in each of the 6 blocks | [PROJECT DECISION] | Paper: "AdaLN applied at each layer" | 2026-11-24 |
 | — | SIGReg integration range | Full ℝ: 2 × trapezoid over [0.2, 4] (the EP integrand is even in t) | Owner | App. A defines the EP integral over all of ℝ; the quadrature on [0.2, 4] covers t > 0 only, so ×2 recovers the full range. Initially implemented without the ×2 (half range), changed by owner 2026-11-24 | 2026-11-24 |
+| — | SIGReg knots and λ (revised) | **t ∈ [0, 3]** (17 knots, ×2 for the full real line, ×N unchanged) and **λ = 0.09**, from the stride-2 run on | Owner, stated as the authors' actual values | Overrides the CLAUDE.md fixed settings (17 knots on [0.2, 4], λ = 0.1) and differs from the paper's text (App. A p. 13: [0.2, 4]; Algorithm 3: λ = 0.1). Runs up to `pusht_scaleN` used [0.2, 4] and λ = 0.1. The t = 0 knot always contributes 0 (ECF(0) = φ₀(0) = 1) | 2026-11-24 |
 | — | SIGReg batch scaling | **×N (N = batch size 128): the conventional N·T Epps–Pulley statistic**, via `sigreg_scale_n: true` in `configs/pusht.yaml`. Supersedes the original "no ×N" choice (2026-11-24), which follows App. A's formula literally | Owner | The first 10-epoch run without ×N trained "fine" by its metrics, but the probes showed **representational (dimensional) collapse**: effective rank of z ≈ 3/192, probe r ≈ 0.5–0.6. A 1-epoch ablation confirmed the cause: effective rank 1.0 without ×N vs 25.5 with ×N; block MLP r 0.54 → 0.92. λ = 0.1 unchanged. See the Phase 4 log entry | 2026-11-24 |
 | — | SIGReg weight | w(t) = exp(−t²/2) (paper's width parameter = 1) | [PROJECT DECISION] | Paper gives the form, not the width | 2026-11-24 |
 | — | SIGReg directions | 1024 fresh directions per step, shared by the 4 time steps within a step | [PROJECT DECISION] | Paper silent on sharing; simplest | 2026-11-24 |
-| 9 | Window stride | **Stride 5** for the full run (2,824 train steps/epoch, 28,240 total, ≈ 1.8 h at 4.40 it/s) | Owner | Fits the time available; stride 1 (13,845 steps/epoch, ≈ 8.7 h) can be revisited later. Each window still holds 4 frames 5 steps apart; stride only sets how often windows start | 2026-11-24 |
+| 9 | Window stride | **Stride 5** for the first runs; **stride 2** from `pusht_s2` (owner 2026-11-24: ≈ 69k steps, ≈ 3.9 h; stride 1 ≈ 8 h was too long for now). (2,824 train steps/epoch, 28,240 total, ≈ 1.8 h at 4.40 it/s) | Owner | Fits the time available; stride 1 (13,845 steps/epoch, ≈ 8.7 h) can be revisited later. Each window still holds 4 frames 5 steps apart; stride only sets how often windows start | 2026-11-24 |
 | — | Dataset frame reads | Read the contiguous rows `r0:r0+16`, then keep every 5th (`[::5]`), instead of h5py list indexing `pixels[[r0, r0+5, r0+10, r0+15]]` | Owner | Identical frames (equality test), but 27× faster in one process (33 → 909 windows/s), and the DataLoader goes from 2.5 to 15.4 batches/s with 12 workers. Training becomes GPU-bound | 2026-11-24 |
 | — | AdamW weight decay | 1e-3 on all parameters, including biases and norms | [PROJECT DECISION] | Paper silent; wd is tiny | 2026-11-24 |
 | — | Action standardization | Per-dimension mean/std over all action rows of train-group episodes (mean ≈ [−0.0072, 0.0060], std ≈ [0.2106, 0.2059]), applied on the GPU, saved in every checkpoint | [PROJECT DECISION] (PLAN default) | Planning in Phase 4 needs the same scaling | 2026-11-24 |
@@ -49,6 +50,7 @@ One line per decision: what was chosen, and why.
 ## Experiments
 | Run ID | Config | Seed | Git hash | Runtime | Peak VRAM | Key results | Artifacts |
 |---|---|---|---|---|---|---|---|
+| pusht_s2 (wandb `j14cpwu4`) + plan + probes | `configs/pusht.yaml` (stride 2, ×N, λ 0.09, t ∈ [0, 3]), 69,510 steps; `lewm.plan` as above | 0 | uncommitted (on top of `aae0c73`) | ≈ 3 h 56 min (4.94 it/s) | 11.21 GiB | **Planning 41/50 = 82% (95% CI 71–93%)**, plan time 0.35 ± 0.05 s (64 plans). Final val (eval mode): pred 0.0177, SIGReg 2.20, emb_std 0.97; train effective rank 77. Probe effective rank 69.7. Probe r (lin/MLP), random split: agent 0.986/0.999, block 0.989/0.999, angle 0.914/0.986; group split: agent 0.930/0.980, block 0.930/0.975, angle 0.718/0.858 | `outputs/runs/pusht_s2/`, `outputs/eval/pusht_s2/` |
 | plan_pusht_scaleN | `lewm.plan`, CEM 300/30/30, H = 5, 50 pairs, budget 50 | per-pair | uncommitted (on top of `2b0cdf4`) | ≈ 1 min | — | **Success 30/50 = 60% (95% CI 46–74%)**; plan time 0.35 ± 0.05 s (78 plans); 0 trivial starts | `outputs/eval/plan_results.json`, `outputs/eval/gifs/` |
 | pusht_scaleN (wandb `12n66vyd`) | `configs/pusht.yaml` (stride 5, ×N), 28,240 steps | 0 | uncommitted (on top of `63cd295`) | ≈ 1 h 36 min (4.94 it/s) | ≈ 11.2 GiB | Final train: pred 0.018, SIGReg (×N) 0.98, emb_std 0.99, effective rank 64. Final val (eval mode): pred 0.031, SIGReg 2.52, emb_std 0.95. Probe r (lin/MLP), random split: agent 0.987/0.999, block 0.982/0.999, angle 0.880/0.984; group split: agent 0.964/0.988, block 0.915/0.929, angle 0.593/0.467 | `outputs/runs/pusht_scaleN/`, `outputs/eval/pusht_scaleN/probes.json` |
 | ablate_base | pusht.yaml, 1 epoch (2,824 steps), no ×N | 0 | uncommitted (on top of `63cd295`) | ≈ 10 min | 11.2 GiB | Effective rank 1.0; probe r (lin/MLP): agent 0.17/0.06, block 0.53/0.54, angle 0.39/0.46 | `outputs/runs/ablate_base/`, `outputs/eval/ablate_base/` |
@@ -100,6 +102,22 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-24 — Phase 4b: stride-2 retrain with the authors' SIGReg values (60% → 82%)
+- **Run:** `pusht_s2`, stride 2 (69,510 steps, 2.5× the stride-5 run), λ = 0.09, t ∈ [0, 3], ×N. 10 epochs finished cleanly in ≈ 3 h 56 min; val pred loss fell every epoch (0.0735 → 0.0177; stride-5 ended at 0.031).
+- **Dev checks first** (same scratch diagnosis as before; eval pairs untouched until both passed):
+
+  | Metric | stride 5 (`pusht_scaleN`) | stride 2 (`pusht_s2`) |
+  |---|---|---|
+  | 5-block rollout error on 500 val windows, median | 25.0 | **10.4** |
+  | Same, relative to start-to-goal distance, median / mean | 0.122 / 0.240 | **0.049 / 0.134** |
+  | Dev-pair single-plan success (25 steps, no replan) | 29/50 | **42/50** |
+  | CEM predicted vs real cost of the reached frame, median | 4.3 vs 24.5 | 2.1 vs 14.0 |
+  | CEM final error, median | 20.9 px / 0.076 rad | 13.3 px / 0.047 rad |
+
+- **Eval pairs (final number):** 41/50 = **82% (95% CI 71–93%)**, up from 60%; 0.35 s per plan. 13 pairs went from fail to success and 2 from success to fail (ep 1078, 13258; 13258 missed by agent position, block err 0.7 px). Of the 9 failures, 6 have block error < 25 px (near misses) and 3 are far off (58–73 px).
+- **Probes:** effective rank 69.7 (was 64). Random split matches or beats Table 1 (angle linear r 0.914 vs 0.880). The group split improved most: angle MLP r 0.467 → 0.858, block linear 0.915 → 0.930.
+- **Caveat:** three things changed at once (stride, λ, t-range), so the gain can't be credited to one. The diagnosis still says the model's prediction error is the limit: CEM's predicted cost is well below the real one.
 
 ### 2026-11-24 — Phase 4b-1: diagnosis, model vs planner
 - **Setup:** 50 dev pairs (seed 1, val groups, episodes disjoint from the 50 eval pairs, which stay untouched). One plan per pair (25 steps, no replanning), comparing the expert's own 25 actions (clipped) with CEM's plan.
