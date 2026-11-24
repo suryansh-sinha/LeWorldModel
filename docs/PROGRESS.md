@@ -3,7 +3,7 @@
 ## Current status
 - **Active phase:** Phase 4 (evaluation). 4a probes done on the ×N retrain; 4b (simulator, CEM) next
 - **Done:** Phase 0 (data); Phase 1 (model); Phase 2 (SIGReg and loss); Phase 3 (training, full 10-epoch run)
-- **Next task:** 4b-1 CEM planner. Checkpoint: `outputs/runs/pusht_scaleN/last.pt`
+- **Next task:** paused; the owner will decide the follow-up later. Diagnosis: model prediction error, not CEM, limits planning (candidate: retrain at stride 1; alternative: accept 60%) Checkpoint: `outputs/runs/pusht_scaleN/last.pt`
 - **Blockers:** none
 
 ## Decisions
@@ -34,6 +34,8 @@ One line per decision: what was chosen, and why.
 | — | Env reset and goal | `env.reset(options={"state": s_t, "goal_state": s_{t+25}})` with dataset 7-d states; goal image = dataset frame at t + 25 | [PROJECT DECISION] | Exact reset is supported through reset options; the green target T is drawn at a fixed pose, as in the dataset | 2026-11-24 |
 | — | Action units | Dataset actions are already in env units (relative mode: PD target = agent pos + 100 × action). No conversion | Verified | Replaying 25 dataset actions reproduces `state[t+25]` within ~1–2 px | 2026-11-24 |
 | — | CEM action clipping | De-normalize CEM actions, then clip to the env's declared `[-1, 1]` | Owner (PLAN default) | The env doesn't enforce it, but only 0.12% of dataset rows exceed it; it also keeps CEM away from actions rarely seen in training | 2026-11-24 |
+| — | CEM details | Samples are clipped (in normalized units) before evaluation, so the cost scores exactly what would be executed. Context = last ≤3 real frames at 5-step spacing plus their executed (clipped, re-normalized) blocks. Output = final CEM mean μ_T; no variance floor; per-pair seed = pair index. An episode succeeds at the first step where the env's check passes, within 50 steps | [PROJECT DECISION] | Paper silent on these details | 2026-11-24 |
+| — | Eval pairs | 50 (episode, t) pairs from val groups, `default_rng(0)`, t uniform in [0, L − 26], goal at t + 25; saved to `configs/eval/pusht_eval_pairs.json` | [PROJECT DECISION] (PLAN protocol) | Fixed once; don't tune on them | 2026-11-24 |
 | — | Python / PyTorch | Python 3.12 (uv-managed), torch 2.11.0+cu128 from the PyTorch cu128 wheel index | [PROJECT DECISION] | cu128 wheels include sm_120 (Blackwell); 3.12 has broad wheel availability | 2026-11-23 |
 
 ## Phase checklist
@@ -47,6 +49,7 @@ One line per decision: what was chosen, and why.
 ## Experiments
 | Run ID | Config | Seed | Git hash | Runtime | Peak VRAM | Key results | Artifacts |
 |---|---|---|---|---|---|---|---|
+| plan_pusht_scaleN | `lewm.plan`, CEM 300/30/30, H = 5, 50 pairs, budget 50 | per-pair | uncommitted (on top of `2b0cdf4`) | ≈ 1 min | — | **Success 30/50 = 60% (95% CI 46–74%)**; plan time 0.35 ± 0.05 s (78 plans); 0 trivial starts | `outputs/eval/plan_results.json`, `outputs/eval/gifs/` |
 | pusht_scaleN (wandb `12n66vyd`) | `configs/pusht.yaml` (stride 5, ×N), 28,240 steps | 0 | uncommitted (on top of `63cd295`) | ≈ 1 h 36 min (4.94 it/s) | ≈ 11.2 GiB | Final train: pred 0.018, SIGReg (×N) 0.98, emb_std 0.99, effective rank 64. Final val (eval mode): pred 0.031, SIGReg 2.52, emb_std 0.95. Probe r (lin/MLP), random split: agent 0.987/0.999, block 0.982/0.999, angle 0.880/0.984; group split: agent 0.964/0.988, block 0.915/0.929, angle 0.593/0.467 | `outputs/runs/pusht_scaleN/`, `outputs/eval/pusht_scaleN/probes.json` |
 | ablate_base | pusht.yaml, 1 epoch (2,824 steps), no ×N | 0 | uncommitted (on top of `63cd295`) | ≈ 10 min | 11.2 GiB | Effective rank 1.0; probe r (lin/MLP): agent 0.17/0.06, block 0.53/0.54, angle 0.39/0.46 | `outputs/runs/ablate_base/`, `outputs/eval/ablate_base/` |
 | ablate_scaleN | pusht.yaml, 1 epoch (2,824 steps), ×N | 0 | uncommitted (on top of `63cd295`) | ≈ 10 min | 11.2 GiB | Effective rank 25.5; probe r (lin/MLP): agent 0.56/0.43, block 0.87/0.92, angle 0.38/0.69 | `outputs/runs/ablate_scaleN/`, `outputs/eval/ablate_scaleN/` |
@@ -97,6 +100,33 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-24 — Phase 4b-1: diagnosis, model vs planner
+- **Setup:** 50 dev pairs (seed 1, val groups, episodes disjoint from the 50 eval pairs, which stay untouched). One plan per pair (25 steps, no replanning), comparing the expert's own 25 actions (clipped) with CEM's plan.
+- **Sim success:** expert 50/50, CEM 29/50 (in line with the 60% on the eval pairs).
+- **The optimizer is not the limit:** CEM finds a lower *predicted* latent cost than the expert in 49/50 pairs, including all 21 CEM failures (median predicted cost 4.3 vs 19.5).
+- **The model is:**
+  - Its 5-block autoregressive prediction error ‖ẑ₅ − z(reached frame)‖² is ≈22 even on expert actions (≈24 on CEM actions), about 7% of the median start-to-goal latent distance (292).
+  - CEM exploits that error: predicted cost 4.3 vs real cost 24.5 for the frame actually reached.
+  - Median CEM final error is 20.9 px / 0.076 rad, right at the 20 px threshold.
+- **Implication:** improving planning needs a more accurate world model, not planner tuning. The main known gap from the paper's likely setup is training length (stride 5: 28k steps; stride 1 would be ≈138k).
+
+### 2026-11-24 — Phase 4b-1: CEM planner and first evaluation (60% vs 96%)
+- **Code:**
+  - `src/lewm/plan.py`: `cem` (Alg. 2), `rollout_cost` (autoregressive latent rollout, context ≤3), MPC loop (plan 5 blocks, execute 25 steps, replan), eval pairs, GIFs, and per-pair final errors.
+  - `tests/test_plan.py` (3 tests): CEM converges on a quadratic; CEM respects the bounds; the rollout context window (real-then-predicted entries, never more than 3).
+- **Result on the 50 fixed pairs:** **30/50 = 60%** (95% CI 46–74%), against the paper's 96.0 ± 2.8%.
+  - Plan time 0.35 ± 0.05 s, faster than the paper's ~1 s. The first plan per process is ~2 s because of CUDA warm-up.
+  - No pair succeeds trivially: no start already satisfies the goal.
+  - A rerun gave the same 30/50.
+- **The 20 failures:**
+  - Median final error: 41 px (agent + block xy combined; needs < 20) and 0.15 rad (needs < 0.35).
+  - 10 are within 2× of both thresholds.
+  - **9 fail only on the agent position**: the block's position and angle are within the thresholds, but the agent isn't.
+  - About 5 are large misses (100–220 px).
+  - Failures start early in their episodes (median t = 31 vs 68 for successes), when the expert makes bigger moves within the 25 steps.
+- **Correction:** looking at a composite of GIF frames, I first called the failures "near misses". Checking against the states showed I had misread the panel layout: ep334 ends 166 px / 148 px away (agent / block). The recorded per-pair errors are the reliable source.
+- **Not done:** any tuning on the 50 eval pairs. They are fixed, and tuning on them would be test-set tuning.
 
 ### 2026-11-24 — Phase 4b-0: simulator investigation (stop for owner review)
 - **BN check** on `pusht_scaleN/last.pt`: eval mode gives *lower* pred_loss than batch stats (train windows 0.0115 vs 0.0158; val 0.0305 vs 0.0391). Eval-mode SIGReg is higher (1.46 vs 1.07) only because batch-stat BN re-standardizes each batch. No recalibration needed.
