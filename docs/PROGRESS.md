@@ -1,9 +1,9 @@
 # PROGRESS
 
 ## Current status
-- **Active phase:** Phase 3 (training). Loop, smoke run, resume and timing check done; loader sped up 2×
-- **Done:** Phase 0 (data); Phase 1 (model); Phase 2 (SIGReg and loss)
-- **Next task:** full 10-epoch run at stride 5 (decision 9)
+- **Active phase:** Phase 3 complete; Phase 4 (evaluation) not started
+- **Done:** Phase 0 (data); Phase 1 (model); Phase 2 (SIGReg and loss); Phase 3 (training, full 10-epoch run)
+- **Next task:** Phase 4 (probes, planning). Checkpoint: `outputs/runs/pusht/last.pt`
 - **Blockers:** none
 
 ## Decisions
@@ -35,13 +35,14 @@ One line per decision: what was chosen, and why.
 - [x] Phase 0: data
 - [x] Phase 1: model
 - [x] Phase 2: SIGReg and loss
-- [ ] Phase 3: training (smoke run, stride decision, 10-epoch run)
+- [x] Phase 3: training (smoke run, stride decision, 10-epoch run)
 - [ ] Phase 4: evaluation (probes, planning, optional surprise)
 - [ ] Stretch: λ = 0 run, more seeds, README
 
 ## Experiments
 | Run ID | Config | Seed | Git hash | Runtime | Peak VRAM | Key results | Artifacts |
 |---|---|---|---|---|---|---|---|
+| pusht (wandb `oayb7cn3`) | `configs/pusht.yaml`, stride 5, 28,240 steps | 0 | `26d624b` | ≈ 1 h 36 min (4.95 it/s; estimated from checkpoint timestamps) | 11.21 GiB | Final train: pred 0.0028, SIGReg 0.103, emb_std 0.79. Final val (eval mode, 20 batches): pred 0.0024, SIGReg 0.114, emb_std 0.78 | `outputs/runs/pusht/epoch_{0..9}.pt`, `last.pt`, `outputs/runs/pusht_full.log` |
 
 ## Deviations from the paper
 - **Dataset size (known, accepted by owner 2026-11-23).** The released `pusht_expert_train.h5` has **18,685 episodes with a mean length of 125.06 steps** (2,336,736 steps). Appendix E, p. 18, describes 20,000 episodes averaging 196 steps. The cause is unknown: 198 × 101 = 19,998 ≈ 20,000 suggests some starting-state groups may have been held out, but this is unverified. We use the file as released, with no resampling or padding to match the paper.
@@ -88,6 +89,23 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-24 — Phase 3: full 10-epoch run (Phase 3 done)
+- **Run:** `configs/pusht.yaml` at stride 5; 28,240 steps at 4.95 it/s with 0% data wait; peak VRAM 11.21 GiB; no NaNs or errors.
+- **Train curve:**
+  - pred_loss 0.47 (step 25) → 0.013 (step 500) → about 0.003
+  - SIGReg 0.32 → 0.10
+  - emb_std 0.23 → 0.79, with no collapse
+- **Val per epoch (eval mode):**
+  - pred_loss 0.089, 0.331, 0.020, 0.0062, 0.0044, 0.0101, 0.0031, 0.0030, 0.0025, 0.0024
+  - SIGReg 0.234 → 0.114
+- **Epoch-1 val spike** (0.331): diagnosed on `epoch_1.pt` as eval-mode BatchNorm lag, not overfitting.
+  - With batch statistics: val pred 0.0051 vs train 0.0044. In eval mode, train windows were just as bad (0.300).
+  - Cause: mostly the encoder projector BN. Its running mean was off by 0.16 batch std and its variance by 12%, because the running stats lag the encoder at peak LR.
+- **Final checkpoint has no gap:**
+  - eval vs train-mode BN: train windows 0.0018 vs 0.0024; val windows 0.0023 vs 0.0036
+  - val ≈ train, so unseen starting states generalize
+  - No BN recalibration is needed for Phase 4.
 
 ### 2026-11-24 — Phase 3 (in progress): training loop, smoke run, loader fix
 - **Code:**
