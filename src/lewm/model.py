@@ -95,8 +95,8 @@ class Block(nn.Module):
 
     def __init__(self, dim: int, heads: int, mlp: int, dropout=0.0, inner_norm: bool = False, qkv_bias: bool = True):
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
-        self.norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+        self.norm1 = nn.LayerNorm(dim, eps=1e-12)
+        self.norm2 = nn.LayerNorm(dim, eps=1e-12)
         # causal=False: the encoder is a ViT; CLS (position 0) must see every patch
         self.attn = Attention(dim, heads, dim // heads, causal=False, dropout=dropout, inner_norm=inner_norm,
                               qkv_bias=qkv_bias)
@@ -209,11 +209,11 @@ class Predictor(nn.Module):
         super().__init__()
         self.pos = nn.Parameter(torch.zeros(1, max_len, dim))
         self.blocks = nn.ModuleList(
-            AdaLNBlock(dim, heads, head_dim, mlp, dropout) for _ in range(depth)
+            AdaLNBlock(dim, heads, head_dim, mlp, dropout, qkv_bias=False) for _ in range(depth)
         )
         self.norm = nn.LayerNorm(dim)
         self.proj = Projector(dim)
-        nn.init.trunc_normal_(self.pos, std=0.02)
+        nn.init.normal_(self.pos, std=1.0)
         self.apply(_init_weights)
         for blk in self.blocks:  # adaLN-Zero: every block starts as the identity
             nn.init.zeros_(blk.ada.weight)
@@ -239,11 +239,15 @@ class LeWM(nn.Module):
         self.action_encoder = ActionEncoder()
         self.predictor = Predictor()
 
+        # ImageNet normalization
+        self.register_buffer("image_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("image_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+
     def encode(self, frames: torch.Tensor) -> torch.Tensor:
         """frames: uint8 (B, T, 3, H, W) -> emb (B, T, D)."""
         B, T = frames.shape[:2]
-        x = frames.flatten(0, 1)  # (B*T, 3, 224, 224) uint8
-        x = (x.float() / 255.0 - 0.5) / 0.5  # (B*T, 3, 224, 224) float in [-1, 1]
+        x = frames.flatten(0, 1).float() / 255.0  # (B*T, 3, 224, 224) float in [0, 1]
+        x = (x - self.image_mean) / self.image_std  # (B*T, 3, 224, 224) ImageNet-normalized, roughly [-2.1, 2.6]
         z = self.encoder(x)  # (B*T, 192)
         return z.view(B, T, -1)  # (B, T, 192)
 

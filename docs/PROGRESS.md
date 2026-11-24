@@ -51,6 +51,7 @@ One line per decision: what was chosen, and why.
 ## Experiments
 | Run ID | Config | Seed | Git hash | Runtime | Peak VRAM | Key results | Artifacts |
 |---|---|---|---|---|---|---|---|
+| ablate_arch2 (wandb `yv4r1yx2`) | pusht.yaml, **architecture v2** (owner: affine encoder LN eps 1e-12, predictor qkv_bias off, predictor pos init std 1.0, ImageNet input normalization), BN projector, 1 epoch (6,951 steps), stride 2 | 0 | uncommitted (on top of `b717f2d`) | ≈ 24 min | 11.21 GiB | Final val pred 0.082, SIGReg 3.87; train rank 31. Rollout rel. error median 0.499; dev-pair single plan **0/50**; CEM final pos err median 142 px | `outputs/runs/ablate_arch2/`, `outputs/runs/ablate_arch2_compare.txt` |
 | ablate_proj_ln (wandb `7eokm9kc`) | pusht.yaml, new architecture, **LN projector**, 1 epoch (6,951 steps), stride 2 | 0 | uncommitted (on top of `f3eeb04`) | ≈ 23 min | 11.22 GiB | Stalled near zero scale for ≈ 1k steps (emb_std 0.001, SIGReg 51). Final val pred 0.345, SIGReg 4.41; train rank 19. Rollout rel. error median 0.693; dev-pair single plan **0/50**; CEM final pos err median 229 px | `outputs/runs/ablate_proj_ln/`, `outputs/runs/ablate_proj_ln_compare.txt` |
 | ablate_proj_bn (wandb `1v0pn3bf`) | same, **BN projector** | 0 | uncommitted (on top of `f3eeb04`) | ≈ 23 min | 11.21 GiB | Final val pred 0.061, SIGReg 3.28; train rank 36. Rollout rel. error median 0.376; dev-pair single plan **9/50**; CEM final pos err median 84 px | `outputs/runs/ablate_proj_bn/`, `outputs/runs/ablate_proj_bn_compare.txt` |
 | plan_pusht_s2_random | `lewm.plan --split random`, same CEM and budget, 50 pairs from any episode (seed 0; 47 from train groups, 3 from val) | per-pair | uncommitted (on top of `8860f39`) | ≈ 1 min | — | **Success 38/50 = 76% (95% CI 64–88%)**; plan time 0.33 ± 0.06 s; 0 trivial starts | `configs/eval/pusht_eval_pairs_random.json`, `outputs/eval/pusht_s2_random/` |
@@ -106,6 +107,30 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-24 — Architecture v2 (owner), 1-epoch check: negative result, worse than v1
+- **Owner's changes on top of `b717f2d`:** encoder block LayerNorms affine with eps 1e-12; predictor `qkv_bias=False`; predictor position embedding init N(0, 1) instead of trunc-normal 0.02 (owner confirmed intended); ImageNet mean/std input normalization (buffers `image_mean`/`image_std`). One fix by me: `encode` read `self.img_mean`/`img_std`, which don't exist (every test failed); renamed to the registered buffers. 19 tests pass; 18.03M params. Old checkpoints don't load (new buffers and LN params).
+- **Architecture differences (everything else identical):**
+
+  | Component | v1 (`b717f2d`) | v2 (this commit) |
+  |---|---|---|
+  | Encoder block norm1/norm2 | LayerNorm, non-affine, eps 1e-6 | LayerNorm, **affine**, eps **1e-12** |
+  | Predictor attention q/k/v bias | on | **off** |
+  | Predictor position embedding init | trunc-normal, std 0.02 | **normal, std 1.0** |
+  | Input normalization | (x/255 − 0.5)/0.5, range [−1, 1] | **ImageNet mean/std**, range ≈ [−2.1, 2.6] |
+
+- **Same 1-epoch stride-2 setup as `ablate_proj_bn` (v1 + BN):**
+
+  | Metric | v1 (`ablate_proj_bn`) | v2 (`ablate_arch2`) |
+  |---|---|---|
+  | Val pred loss / SIGReg | **0.061 / 3.28** | 0.082 / 3.87 |
+  | Train pred loss at steps 3k / 5k / 6.95k | 0.067 / 0.049 / 0.050 | 0.083 / 0.069 / 0.066 |
+  | Train effective rank (end) | **36** | 31 |
+  | 5-block rollout error, relative, median | **0.376** | 0.499 |
+  | Dev-pair single-plan success | **9/50** | 0/50 |
+  | CEM final pos err, median | **84 px** | 142 px |
+
+- v2 is worse on every metric. Its train loss flattened from step ≈ 4k while v1's kept falling. One seed each, so small gaps could be noise, but 9/50 vs 0/50 and a 33% higher rollout error are consistent. Which of the four changes is responsible isn't tested; the largest is the position init (std 1.0 = embedding scale).
 
 ### 2026-11-24 — Ablation: a LayerNorm projector collapses under SIGReg; keep BatchNorm
 - **Setup:** new architecture (owner's changes, bug fixes, inner_norm off in encoder / on in predictor), stride 2, 1 epoch (6,951 steps, cosine over 1 epoch), λ 0.09, t ∈ [0, 3], ×N, seed 0. Only `projector` differs. Configs in `outputs/ablate_configs/`; comparison script `outputs/tools/compare_ckpt.py` (rebuilt from the earlier scratch script; dev pairs seed 1, 500 val windows).
