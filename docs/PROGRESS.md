@@ -1,9 +1,9 @@
 # PROGRESS
 
 ## Current status
-- **Active phase:** Phase 3 complete; Phase 4 (evaluation) not started
+- **Active phase:** Phase 4 (evaluation). 4a probes done on the ×N retrain; 4b (simulator, CEM) next
 - **Done:** Phase 0 (data); Phase 1 (model); Phase 2 (SIGReg and loss); Phase 3 (training, full 10-epoch run)
-- **Next task:** Phase 4 (probes, planning). Checkpoint: `outputs/runs/pusht/last.pt`
+- **Next task:** 4b-0 simulator investigation (install `swm/PushT-v1`, units, reset-to-state, success check), then stop and report. Checkpoint: `outputs/runs/pusht_scaleN/last.pt`. The old `outputs/runs/pusht` is collapsed; don't use it
 - **Blockers:** none
 
 ## Decisions
@@ -20,7 +20,7 @@ One line per decision: what was chosen, and why.
 | — | Predictor dropout | 0.1 on the attention output and MLP output inside each residual branch; none in the encoder | [PROJECT DECISION] | Paper gives the rate only | 2026-11-24 |
 | — | Predictor final norm | plain LayerNorm (no adaLN) before the projector; adaLN-Zero (shift, scale, gate) in each of the 6 blocks | [PROJECT DECISION] | Paper: "AdaLN applied at each layer" | 2026-11-24 |
 | — | SIGReg integration range | Full ℝ: 2 × trapezoid over [0.2, 4] (the EP integrand is even in t) | Owner | App. A defines the EP integral over all of ℝ; the quadrature on [0.2, 4] covers t > 0 only, so ×2 recovers the full range. Initially implemented without the ×2 (half range), changed by owner 2026-11-24 | 2026-11-24 |
-| — | SIGReg batch scaling | **No ×N factor** (mean ECF, not the classical N·T Epps–Pulley statistic) | Owner (PLAN default) | Conventionally the EP test is scaled by N so that its null value is O(1). Unscaled, the value for Gaussian embeddings is a ~1/N noise floor, but for non-Gaussian ones it converges to the true distance, so the regularizer does not weaken with batch size. Measured (192-d, unscaled, half range): N(0.5, I) 0.071→0.056 and N(0, 0.25I) 0.081→0.076 for N = 32→8192; all-zeros fixed at 0.204; N(0, I) × N ≈ 0.5. ×N at B = 128 would act like λ = 12.8. **Revisit first if training collapses or SIGReg seems too weak** | 2026-11-24 |
+| — | SIGReg batch scaling | **×N (N = batch size 128): the conventional N·T Epps–Pulley statistic**, via `sigreg_scale_n: true` in `configs/pusht.yaml`. Supersedes the original "no ×N" choice (2026-11-24), which follows App. A's formula literally | Owner | The first 10-epoch run without ×N trained "fine" by its metrics, but the probes showed **representational (dimensional) collapse**: effective rank of z ≈ 3/192, probe r ≈ 0.5–0.6. A 1-epoch ablation confirmed the cause: effective rank 1.0 without ×N vs 25.5 with ×N; block MLP r 0.54 → 0.92. λ = 0.1 unchanged. See the Phase 4 log entry | 2026-11-24 |
 | — | SIGReg weight | w(t) = exp(−t²/2) (paper's width parameter = 1) | [PROJECT DECISION] | Paper gives the form, not the width | 2026-11-24 |
 | — | SIGReg directions | 1024 fresh directions per step, shared by the 4 time steps within a step | [PROJECT DECISION] | Paper silent on sharing; simplest | 2026-11-24 |
 | 9 | Window stride | **Stride 5** for the full run (2,824 train steps/epoch, 28,240 total, ≈ 1.8 h at 4.40 it/s) | Owner | Fits the time available; stride 1 (13,845 steps/epoch, ≈ 8.7 h) can be revisited later. Each window still holds 4 frames 5 steps apart; stride only sets how often windows start | 2026-11-24 |
@@ -29,6 +29,7 @@ One line per decision: what was chosen, and why.
 | — | Action standardization | Per-dimension mean/std over all action rows of train-group episodes (mean ≈ [−0.0072, 0.0060], std ≈ [0.2106, 0.2059]), applied on the GPU, saved in every checkpoint | [PROJECT DECISION] (PLAN default) | Planning in Phase 4 needs the same scaling | 2026-11-24 |
 | — | Checkpoints / resume | Saved at epoch end (`epoch_k.pt` + `last.pt`; smoke keeps only `last.pt`); `--resume` continues from the next epoch. Per-epoch data order is seeded with `seed + epoch` | [PROJECT DECISION] | Simplest; a crash loses at most part of one epoch | 2026-11-24 |
 | — | Validation loss | Every epoch, on 20 fixed val-group batches (2,560 windows, seeded), in eval mode | Owner | Spots overfitting over the 10 epochs | 2026-11-24 |
+| — | Probe protocol | Frames: every 5th row of all val-group episodes (~50k), post-projector z, eval mode. Labels: agent `state[0:2]`, block `state[2:4]`, raw angle `state[4]`, z-scored with probe-train stats. Probes: linear least squares with bias; MLP 192→256→out (GELU, AdamW 1e-3, 100 epochs, batch 1024). Two splits, both reported: **random** 75/25 frame split (seed 0; comparable to Table 1) and **group** split (14 / 5 val groups; unseen starting states) | Owner (both splits); rest [PROJECT DECISION] | The paper doesn't state its probe split. The group split is stricter: 14 starting states don't cover the block poses, so block and angle drop | 2026-11-24 |
 | — | Python / PyTorch | Python 3.12 (uv-managed), torch 2.11.0+cu128 from the PyTorch cu128 wheel index | [PROJECT DECISION] | cu128 wheels include sm_120 (Blackwell); 3.12 has broad wheel availability | 2026-11-23 |
 
 ## Phase checklist
@@ -42,7 +43,10 @@ One line per decision: what was chosen, and why.
 ## Experiments
 | Run ID | Config | Seed | Git hash | Runtime | Peak VRAM | Key results | Artifacts |
 |---|---|---|---|---|---|---|---|
-| pusht (wandb `oayb7cn3`) | `configs/pusht.yaml`, stride 5, 28,240 steps | 0 | `26d624b` | ≈ 1 h 36 min (4.95 it/s; estimated from checkpoint timestamps) | 11.21 GiB | Final train: pred 0.0028, SIGReg 0.103, emb_std 0.79. Final val (eval mode, 20 batches): pred 0.0024, SIGReg 0.114, emb_std 0.78 | `outputs/runs/pusht/epoch_{0..9}.pt`, `last.pt`, `outputs/runs/pusht_full.log` |
+| pusht_scaleN (wandb `12n66vyd`) | `configs/pusht.yaml` (stride 5, ×N), 28,240 steps | 0 | uncommitted (on top of `63cd295`) | ≈ 1 h 36 min (4.94 it/s) | ≈ 11.2 GiB | Final train: pred 0.018, SIGReg (×N) 0.98, emb_std 0.99, effective rank 64. Final val (eval mode): pred 0.031, SIGReg 2.52, emb_std 0.95. Probe r (lin/MLP), random split: agent 0.987/0.999, block 0.982/0.999, angle 0.880/0.984; group split: agent 0.964/0.988, block 0.915/0.929, angle 0.593/0.467 | `outputs/runs/pusht_scaleN/`, `outputs/eval/pusht_scaleN/probes.json` |
+| ablate_base | pusht.yaml, 1 epoch (2,824 steps), no ×N | 0 | uncommitted (on top of `63cd295`) | ≈ 10 min | 11.2 GiB | Effective rank 1.0; probe r (lin/MLP): agent 0.17/0.06, block 0.53/0.54, angle 0.39/0.46 | `outputs/runs/ablate_base/`, `outputs/eval/ablate_base/` |
+| ablate_scaleN | pusht.yaml, 1 epoch (2,824 steps), ×N | 0 | uncommitted (on top of `63cd295`) | ≈ 10 min | 11.2 GiB | Effective rank 25.5; probe r (lin/MLP): agent 0.56/0.43, block 0.87/0.92, angle 0.38/0.69 | `outputs/runs/ablate_scaleN/`, `outputs/eval/ablate_scaleN/` |
+| pusht (wandb `oayb7cn3`) | `configs/pusht.yaml`, stride 5, 28,240 steps | 0 | `26d624b` | ≈ 1 h 36 min (4.95 it/s; estimated from checkpoint timestamps) | 11.21 GiB | **Collapsed (superseded):** effective rank ≈ 3/192, probe linear r agent 0.59 / block 0.64 / angle 0.60. Final train: pred 0.0028, SIGReg 0.103, emb_std 0.79. Final val (eval mode, 20 batches): pred 0.0024, SIGReg 0.114, emb_std 0.78 | `outputs/runs/pusht/epoch_{0..9}.pt`, `last.pt`, `outputs/runs/pusht_full.log` |
 
 ## Deviations from the paper
 - **Dataset size (known, accepted by owner 2026-11-23).** The released `pusht_expert_train.h5` has **18,685 episodes with a mean length of 125.06 steps** (2,336,736 steps). Appendix E, p. 18, describes 20,000 episodes averaging 196 steps. The cause is unknown: 198 × 101 = 19,998 ≈ 20,000 suggests some starting-state groups may have been held out, but this is unverified. We use the file as released, with no resampling or padding to match the paper.
@@ -89,6 +93,52 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-24 — Phase 4a: ×N retrain and probe results
+- **Retrain:** 10 epochs, stride 5, ×N, no errors.
+  - Effective rank of z: 31 after epoch 0, **64 at the end** (probe frames: 56.7), against ≈3 without ×N.
+  - Val pred_loss fell every epoch: 0.136 → 0.031.
+  - Eval-mode val SIGReg stays above train (2.5 vs ≈1.0), so the running-stat lag hasn't fully gone. Worth rechecking before planning.
+- **Probes, random frame split, matching Table 1:**
+
+  | | Ours, linear / MLP r | Paper, linear / MLP r |
+  |---|---|---|
+  | Agent | 0.987 / 0.999 | 0.974 / 0.998 |
+  | Block | 0.982 / 0.999 | 0.986 / 0.999 |
+  | Angle | 0.880 / 0.984 | 0.902 / 0.990 |
+
+- **Probes, group split, lower:** agent 0.964 / 0.988, block 0.915 / 0.929, angle 0.593 / 0.467.
+- **Why the group split is lower for block and angle:**
+  - It isn't the angle wrap. 17% of frames are within 0.5 rad of 0/2π, but (cos, sin) labels score just as low (0.44 / 0.49), and frames away from the wrap only reach 0.64.
+  - It's coverage. Each group shares one starting block pose, so 14 groups cover only part of the block-pose space and the probe must extrapolate to 5 unseen ones.
+  - Under the random split the same embedding gives 0.98 / 0.999, so the information is present. By contrast, the collapsed run could only reach linear r 0.82 on the agent even when scored on its own training frames.
+- **Owner decision:** `probe.py` reports both splits.
+- **Process slip:** a background wait-then-probe job never ran, because its `pgrep -f` pattern matched the job's own command line. I killed it and ran the probes directly.
+
+### 2026-11-24 — Phase 4a: probes revealed representational collapse; retrain with SIGReg ×N
+- **What happened:**
+  - By its own metrics, training looked correct: no NaNs, val pred 0.0024 ≈ train, emb_std 0.79, SIGReg falling.
+  - The first probes (`src/lewm/eval/probe.py`) on `outputs/runs/pusht/last.pt` were far below Table 1. Linear r: agent 0.587, block 0.641, angle 0.595. The MLP was *worse* than linear (0.45–0.55).
+- **Diagnosis:**
+  - The probe was ruled out: linear r was only 0.82 even when fit and scored on its own training frames; nearest neighbours in z were closer in agent position than random (56 vs 186 px); and a random-frame split gave the same r.
+  - Looking at **effective rank** (exp-entropy of the covariance eigenvalues) of z: **1.1 → 2.6 → 3.0 of 192** at epochs 0 / 4 / 9, with ~100% of the variance in 5 dims. The pre-projector CLS was equally poor (r ≈ 0.57–0.67).
+  - So this is **representational (dimensional) collapse**. `emb_std` (per-dim std, averaged) missed it, because all 192 dims were mixtures of ~3 factors.
+- **Cause:** SIGReg too weak. Without ×N, it barely penalizes a low-rank embedding whose random projections are roughly Gaussian. It only fell 0.32 → 0.10, against a Gaussian floor of ≈0.008 at B = 128.
+- **Ablation evidence:** 1 epoch each, same seed and settings, λ = 0.1.
+
+  | | No ×N | ×N |
+  |---|---|---|
+  | Effective rank | 1.0 | **25.5** |
+  | Agent r (lin/MLP) | 0.17/0.06 | 0.56/0.43 |
+  | Block r (lin/MLP) | 0.53/0.54 | **0.87/0.92** |
+  | Angle r (lin/MLP) | 0.39/0.46 | 0.38/**0.69** |
+
+  The ×N arm's train pred_loss is higher (0.08 vs 0.006), as expected once the embedding stops being nearly constant. Both arms' eval-mode probes are likely understated after 1 epoch because of BN running-stat lag (×N val SIGReg 4.1 vs train ≈1.9).
+- **Fix:**
+  - **Owner decision:** SIGReg uses ×N (`sigreg_scale_n: true`).
+  - Code: `sigreg(..., scale_n)`, with the default still off so the tests and the paper's formula stay as written. Also new: an `effective_rank` helper, which train.py now logs as `train/emb_rank`, and the probe script prints.
+  - Retraining 10 epochs at stride 5 into `outputs/runs/pusht_scaleN`. The old run is kept but superseded.
+- **Lesson:** monitor effective rank, not only emb_std. Collapse can be dimensional rather than total.
 
 ### 2026-11-24 — Phase 3: full 10-epoch run (Phase 3 done)
 - **Run:** `configs/pusht.yaml` at stride 5; 28,240 steps at 4.95 it/s with 0% data wait; peak VRAM 11.21 GiB; no NaNs or errors.

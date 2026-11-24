@@ -21,7 +21,7 @@ import yaml
 from torch.utils.data import DataLoader, Subset
 
 from lewm.data.pusht import PushTWindows, episodes_of_groups, load_split
-from lewm.loss import lewm_loss
+from lewm.loss import effective_rank, lewm_loss
 from lewm.model import LeWM
 
 LOG_EVERY = 25
@@ -56,7 +56,7 @@ def lr_lambda(total_steps: int, warmup_frac: float):
 
 
 @torch.no_grad()
-def evaluate(model, loader, mean, std, lam, device) -> dict:
+def evaluate(model, loader, mean, std, lam, device, scale_n=False) -> dict:
     model.eval()
     sums = {"pred_loss": 0.0, "sigreg": 0.0, "emb_std": 0.0, "loss": 0.0}
     n = 0
@@ -64,7 +64,7 @@ def evaluate(model, loader, mean, std, lam, device) -> dict:
         frames = batch["frames"].to(device, non_blocking=True)
         actions = normalize_actions(batch["actions"].to(device, non_blocking=True), mean, std)
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            out = lewm_loss(model, frames, actions, lam=lam)
+            out = lewm_loss(model, frames, actions, lam=lam, sigreg_scale_n=scale_n)
         for k in sums:
             sums[k] += out[k].item()
         n += 1
@@ -144,7 +144,7 @@ def main() -> None:
             frames = batch["frames"].to(device, non_blocking=True)                  # (B, 4, 3, 224, 224) uint8
             actions = normalize_actions(batch["actions"].to(device, non_blocking=True), mean, std)  # (B, 4, 10)
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                out = lewm_loss(model, frames, actions, lam=cfg["lam"])
+                out = lewm_loss(model, frames, actions, lam=cfg["lam"], sigreg_scale_n=cfg.get("sigreg_scale_n", False))
             opt.zero_grad(set_to_none=True)
             out["loss"].backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
@@ -159,14 +159,16 @@ def main() -> None:
                 steady_t0, wait_at_t0 = time.perf_counter(), wait
             if step % LOG_EVERY == 0:
                 now = time.perf_counter()
+                emb = out.pop("emb")
                 metrics = {f"train/{k}": v.item() for k, v in out.items()}
+                metrics["train/emb_rank"] = effective_rank(emb.flatten(0, 1).float())
                 metrics.update({"train/grad_norm": grad_norm.item(), "lr": sched.get_last_lr()[0],
                                 "it_per_s": LOG_EVERY / (now - t_last), "data_wait_frac": wait / (now - t_last),
                                 "peak_vram_gb": torch.cuda.max_memory_allocated() / 2**30, "epoch": epoch})
                 run.log(metrics, step=step)
                 print(f"ep {epoch} step {step}/{total_steps} loss {metrics['train/loss']:.4f} "
                       f"pred {metrics['train/pred_loss']:.4f} sigreg {metrics['train/sigreg']:.4f} "
-                      f"emb_std {metrics['train/emb_std']:.3f} gnorm {metrics['train/grad_norm']:.2f} "
+                      f"emb_std {metrics['train/emb_std']:.3f} rank {metrics['train/emb_rank']:.1f} gnorm {metrics['train/grad_norm']:.2f} "
                       f"lr {metrics['lr']:.2e} {metrics['it_per_s']:.2f} it/s wait {metrics['data_wait_frac']:.0%}",
                       flush=True)
                 t_last, wait = now, 0.0
@@ -184,7 +186,7 @@ def main() -> None:
         if done:
             break
 
-        val = evaluate(model, val_loader, mean, std, cfg["lam"], device)
+        val = evaluate(model, val_loader, mean, std, cfg["lam"], device, cfg.get("sigreg_scale_n", False))
         run.log(val, step=step)
         print(f"== epoch {epoch} done, step {step}: " + " ".join(f"{k} {v:.4f}" for k, v in val.items()), flush=True)
         ck = {"model": model.state_dict(), "opt": opt.state_dict(), "sched": sched.state_dict(), "epoch": epoch,

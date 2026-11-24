@@ -12,5 +12,6 @@ num_workers: 12
 seed: 0
 val_batches: 20
 keep_epoch_ckpts: true
-out_dir: outputs/runs/pusht
+out_dir: outputs/runs/pusht_scaleN
 wandb: {project: lewm, mode: online}
+sigreg_scale_n: true  # owner 2026-11-24: conventional N*T Epps-Pulley statistic; without it the embedding collapsed (see PROGRESS.md)
