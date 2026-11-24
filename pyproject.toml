@@ -12,6 +12,13 @@ dependencies = [
     "matplotlib",
     "huggingface_hub",
     "wandb>=0.31.2",
+    "stable-worldmodel>=0.1.1",
+    "torchvision>=0.26.0",
+    "opencv-python-headless>=5.1.0.95",
+    "pygame>=2.6.1",
+    "pymunk>=7.3.1",
+    "shapely>=2.2.0",
+    "imageio>=2.38.2",
 ]
 
 [dependency-groups]
@@ -32,6 +39,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

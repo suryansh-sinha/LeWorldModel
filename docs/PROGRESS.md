@@ -3,7 +3,7 @@
 ## Current status
 - **Active phase:** Phase 4 (evaluation). 4a probes done on the ×N retrain; 4b (simulator, CEM) next
 - **Done:** Phase 0 (data); Phase 1 (model); Phase 2 (SIGReg and loss); Phase 3 (training, full 10-epoch run)
-- **Next task:** 4b-0 simulator investigation (install `swm/PushT-v1`, units, reset-to-state, success check), then stop and report. Checkpoint: `outputs/runs/pusht_scaleN/last.pt`. The old `outputs/runs/pusht` is collapsed; don't use it
+- **Next task:** 4b-1 CEM planner. Checkpoint: `outputs/runs/pusht_scaleN/last.pt`
 - **Blockers:** none
 
 ## Decisions
@@ -30,6 +30,10 @@ One line per decision: what was chosen, and why.
 | — | Checkpoints / resume | Saved at epoch end (`epoch_k.pt` + `last.pt`; smoke keeps only `last.pt`); `--resume` continues from the next epoch. Per-epoch data order is seeded with `seed + epoch` | [PROJECT DECISION] | Simplest; a crash loses at most part of one epoch | 2026-11-24 |
 | — | Validation loss | Every epoch, on 20 fixed val-group batches (2,560 windows, seeded), in eval mode | Owner | Spots overfitting over the 10 epochs | 2026-11-24 |
 | — | Probe protocol | Frames: every 5th row of all val-group episodes (~50k), post-projector z, eval mode. Labels: agent `state[0:2]`, block `state[2:4]`, raw angle `state[4]`, z-scored with probe-train stats. Probes: linear least squares with bias; MLP 192→256→out (GELU, AdamW 1e-3, 100 epochs, batch 1024). Two splits, both reported: **random** 75/25 frame split (seed 0; comparable to Table 1) and **group** split (14 / 5 val groups; unseen starting states) | Owner (both splits); rest [PROJECT DECISION] | The paper doesn't state its probe split. The group split is stricter: 14 starting states don't cover the block poses, so block and angle drop | 2026-11-24 |
+| — | Simulator install | `stable-worldmodel` 0.1.1 with only PushT's runtime deps (`opencv-python-headless`, `pygame`, `pymunk`, `shapely`, `imageio`), not the heavy `[env]` extra (JAX/craftax, ALE, mujoco, …). `torchvision` is pinned as a direct dependency from the cu128 index | [PROJECT DECISION] | The PyPI torchvision didn't match our cu128 torch (`torchvision::nms does not exist`); uv sources only apply to direct deps. torch stays 2.11.0+cu128 | 2026-11-24 |
+| — | Env reset and goal | `env.reset(options={"state": s_t, "goal_state": s_{t+25}})` with dataset 7-d states; goal image = dataset frame at t + 25 | [PROJECT DECISION] | Exact reset is supported through reset options; the green target T is drawn at a fixed pose, as in the dataset | 2026-11-24 |
+| — | Action units | Dataset actions are already in env units (relative mode: PD target = agent pos + 100 × action). No conversion | Verified | Replaying 25 dataset actions reproduces `state[t+25]` within ~1–2 px | 2026-11-24 |
+| — | CEM action clipping | De-normalize CEM actions, then clip to the env's declared `[-1, 1]` | Owner (PLAN default) | The env doesn't enforce it, but only 0.12% of dataset rows exceed it; it also keeps CEM away from actions rarely seen in training | 2026-11-24 |
 | — | Python / PyTorch | Python 3.12 (uv-managed), torch 2.11.0+cu128 from the PyTorch cu128 wheel index | [PROJECT DECISION] | cu128 wheels include sm_120 (Blackwell); 3.12 has broad wheel availability | 2026-11-23 |
 
 ## Phase checklist
@@ -93,6 +97,25 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-24 — Phase 4b-0: simulator investigation (stop for owner review)
+- **BN check** on `pusht_scaleN/last.pt`: eval mode gives *lower* pred_loss than batch stats (train windows 0.0115 vs 0.0158; val 0.0305 vs 0.0391). Eval-mode SIGReg is higher (1.46 vs 1.07) only because batch-stat BN re-standardizes each batch. No recalibration needed.
+- **Install:** `uv add stable-worldmodel`, then fix two problems:
+  1. torchvision from PyPI broke the import (`torchvision::nms does not exist`). Fixed by making torchvision a direct dependency from the cu128 index (`0.26.0+cu128`).
+  2. The env's runtime deps were missing. Added `opencv-python-headless`, `pygame`, `pymunk`, `shapely` and `imageio`; skipped the heavy `[env]` extra.
+  - torch is unchanged (2.11.0+cu128), and `swm/PushT-v1` creates fine. Only the env class was read (reset/step/eval_state/render source), not the library's models, planners or data code.
+- **Env facts:**
+  - Observation `state` has the dataset's 7-d layout.
+  - `reset(options={"state", "goal_state"})` sets an exact start and goal (`_set_state` takes one 0.01 s physics step).
+  - The action space is declared as `Box(-1, 1)` but is **not enforced**: `step` doesn't clip.
+  - Relative control: PD target = agent pos + 100 × action, with 10 physics substeps per env step.
+  - Success (`eval_state`): ‖goal[:4] − cur[:4]‖ < 20 (agent + block xy together) and angle diff < π/9 (wrap-aware). `step` returns `terminated = success`.
+  - Render: 224×224×3 uint8; the green target is at a fixed `goal_pose`.
+- **Match checks** (8 random val windows, `outputs/eval/sim_check/sim_vs_data.png`):
+  - Reset render vs dataset frame: mean |diff| 0.34–0.52 (of 255), only along shape edges.
+  - Replaying 25 dataset actions: agent 0.3–1.1 px, block 0.0–2.3 px, angle ≤ 0.017 rad from `state[t+25]`. **Oracle success 8/8.**
+  - Encoder: ‖z_sim − z_data‖ median 0.89, vs 19.2 between a dataset frame and random frames.
+- **Owner decision (resolved):** clip CEM actions to [−1, 1] (PLAN default). Context: PLAN's default clips CEM actions to the env's action space, `[-1, 1]`. But the env doesn't enforce it, and the expert data goes beyond it (−1.5 … 2.0; std 0.21). Only 0.12% of dataset rows have a component outside [−1, 1].
 
 ### 2026-11-24 — Phase 4a: ×N retrain and probe results
 - **Retrain:** 10 epochs, stride 5, ×N, no errors.
