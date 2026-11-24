@@ -25,7 +25,8 @@ N_SAMPLES, N_ELITES, N_ITERS = 300, 30, 30
 CONTEXT = 3          # predictor history length
 GOAL_OFFSET = 25     # goal is 25 env steps after the start
 BUDGET = 50          # env steps per episode
-PAIRS_PATH = Path("configs/eval/pusht_eval_pairs.json")
+PAIRS_PATHS = {"val": Path("configs/eval/pusht_eval_pairs.json"),            # val groups only (held out)
+               "random": Path("configs/eval/pusht_eval_pairs_random.json")}  # any episode, train or val
 
 
 def cem(cost_fn, lo: torch.Tensor, hi: torch.Tensor, H: int = HORIZON, dim: int = BLOCK, n: int = N_SAMPLES,
@@ -65,11 +66,12 @@ def rollout_cost(predict, ctx_z: torch.Tensor, ctx_a: torch.Tensor, z_goal: torc
     return ((z_next.float() - z_goal.float()) ** 2).sum(-1)                        # (n,)
 
 
-def make_eval_pairs(h5_path: str, n: int = 50, seed: int = 0) -> list[dict]:
+def make_eval_pairs(h5_path: str, n: int = 50, seed: int = 0, split: str = "val") -> list[dict]:
     with h5py.File(h5_path, "r") as f:
         off, lens = f["ep_offset"][:], f["ep_len"][:]
     rng = np.random.default_rng(seed)
-    eps = rng.choice(episodes_of_groups(load_split()["val_groups"]), n, replace=False)
+    pool = episodes_of_groups(load_split()["val_groups"]) if split == "val" else np.arange(len(lens))
+    eps = rng.choice(pool, n, replace=False)
     pairs = []
     for e in sorted(int(x) for x in eps):
         t = int(rng.integers(0, lens[e] - GOAL_OFFSET))      # t + 25 <= L - 1
@@ -77,12 +79,13 @@ def make_eval_pairs(h5_path: str, n: int = 50, seed: int = 0) -> list[dict]:
     return pairs
 
 
-def load_or_make_pairs(h5_path: str) -> list[dict]:
-    if PAIRS_PATH.exists():
-        return json.loads(PAIRS_PATH.read_text())["pairs"]
-    pairs = make_eval_pairs(h5_path)
-    PAIRS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PAIRS_PATH.write_text(json.dumps({"seed": 0, "goal_offset": GOAL_OFFSET, "split": "val_groups",
+def load_or_make_pairs(h5_path: str, split: str = "val") -> list[dict]:
+    path = PAIRS_PATHS[split]
+    if path.exists():
+        return json.loads(path.read_text())["pairs"]
+    pairs = make_eval_pairs(h5_path, split=split)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"seed": 0, "goal_offset": GOAL_OFFSET, "split": "val_groups" if split == "val" else "all_episodes",
                                       "pairs": pairs}, indent=1) + "\n")
     return pairs
 
@@ -140,6 +143,7 @@ def main() -> None:
     p.add_argument("--ckpt", default="outputs/runs/pusht_scaleN/last.pt")
     p.add_argument("--h5", default="data/pusht_expert_train.h5")
     p.add_argument("--out", default="outputs/eval")
+    p.add_argument("--split", choices=list(PAIRS_PATHS), default="val", help="pairs from val groups or from any episode")
     p.add_argument("--n_pairs", type=int, default=None, help="evaluate only the first N pairs (debugging)")
     args = p.parse_args()
     out = Path(args.out)
@@ -160,7 +164,7 @@ def main() -> None:
         with torch.autocast("cuda", dtype=torch.bfloat16):
             return model.encode(x)[0, 0]
 
-    pairs = load_or_make_pairs(args.h5)[: args.n_pairs]
+    pairs = load_or_make_pairs(args.h5, args.split)[: args.n_pairs]
     env = gym.make("swm/PushT-v1")
     f = h5py.File(args.h5, "r")
     results, gifs = [], {"success": 0, "failure": 0}
@@ -189,7 +193,7 @@ def main() -> None:
     half = 1.96 * math.sqrt(rate * (1 - rate) / len(results))                         # normal-approx 95% CI
     times = np.array([t for r in results for t in r["plan_times"]])
     n_triv = sum(r["start_already_success"] for r in results)
-    summary = {"ckpt": args.ckpt, "n": len(results), "successes": n_ok, "success_rate": rate,
+    summary = {"ckpt": args.ckpt, "split": args.split, "n": len(results), "successes": n_ok, "success_rate": rate,
                "start_already_success": n_triv,
                "ci95": [max(0.0, rate - half), min(1.0, rate + half)],
                "plan_time_mean_s": float(times.mean()), "plan_time_std_s": float(times.std())}

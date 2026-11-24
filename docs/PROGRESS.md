@@ -50,6 +50,7 @@ One line per decision: what was chosen, and why.
 ## Experiments
 | Run ID | Config | Seed | Git hash | Runtime | Peak VRAM | Key results | Artifacts |
 |---|---|---|---|---|---|---|---|
+| plan_pusht_s2_random | `lewm.plan --split random`, same CEM and budget, 50 pairs from any episode (seed 0; 47 from train groups, 3 from val) | per-pair | uncommitted (on top of `8860f39`) | ≈ 1 min | — | **Success 38/50 = 76% (95% CI 64–88%)**; plan time 0.33 ± 0.06 s; 0 trivial starts | `configs/eval/pusht_eval_pairs_random.json`, `outputs/eval/pusht_s2_random/` |
 | pusht_s2 (wandb `j14cpwu4`) + plan + probes | `configs/pusht.yaml` (stride 2, ×N, λ 0.09, t ∈ [0, 3]), 69,510 steps; `lewm.plan` as above | 0 | uncommitted (on top of `aae0c73`) | ≈ 3 h 56 min (4.94 it/s) | 11.21 GiB | **Planning 41/50 = 82% (95% CI 71–93%)**, plan time 0.35 ± 0.05 s (64 plans). Final val (eval mode): pred 0.0177, SIGReg 2.20, emb_std 0.97; train effective rank 77. Probe effective rank 69.7. Probe r (lin/MLP), random split: agent 0.986/0.999, block 0.989/0.999, angle 0.914/0.986; group split: agent 0.930/0.980, block 0.930/0.975, angle 0.718/0.858 | `outputs/runs/pusht_s2/`, `outputs/eval/pusht_s2/` |
 | plan_pusht_scaleN | `lewm.plan`, CEM 300/30/30, H = 5, 50 pairs, budget 50 | per-pair | uncommitted (on top of `2b0cdf4`) | ≈ 1 min | — | **Success 30/50 = 60% (95% CI 46–74%)**; plan time 0.35 ± 0.05 s (78 plans); 0 trivial starts | `outputs/eval/plan_results.json`, `outputs/eval/gifs/` |
 | pusht_scaleN (wandb `12n66vyd`) | `configs/pusht.yaml` (stride 5, ×N), 28,240 steps | 0 | uncommitted (on top of `63cd295`) | ≈ 1 h 36 min (4.94 it/s) | ≈ 11.2 GiB | Final train: pred 0.018, SIGReg (×N) 0.98, emb_std 0.99, effective rank 64. Final val (eval mode): pred 0.031, SIGReg 2.52, emb_std 0.95. Probe r (lin/MLP), random split: agent 0.987/0.999, block 0.982/0.999, angle 0.880/0.984; group split: agent 0.964/0.988, block 0.915/0.929, angle 0.593/0.467 | `outputs/runs/pusht_scaleN/`, `outputs/eval/pusht_scaleN/probes.json` |
@@ -102,6 +103,12 @@ Source: `pusht_expert_train.h5.zst` from the HF **dataset** repo `quentinll/lewm
 
 ## Log
 Newest entries first. For each meaningful event, record: what happened, the root cause, what was tried, the verified fix, and the evidence.
+
+### 2026-11-24 — Phase 4b: stride-2 model on random-split pairs (owner request)
+- **Why:** the owner asked for a re-evaluation on random-split pairs, as the paper likely did. The paper doesn't state where its planning pairs come from: p. 18 only says the setup "follows [18]", so this is our reading, matching the probes' "random" protocol.
+- **Pairs:** 50 drawn uniformly from all 18,685 episodes (seed 0), goal at t + 25, budget 50, same CEM. Saved to `configs/eval/pusht_eval_pairs_random.json`; `lewm.plan --split random` (default `--split val` still uses the original pairs).
+- **Result:** 38/50 = **76% (95% CI 64–88%)**, vs 82% (71–93%) on the val-group pairs. The CIs overlap, so evaluating on training episodes doesn't help. The gap to 96% is not about which split the pairs come from.
+- **Failures:** 12. Three have the block in place (≤ 14 px, ≤ 0.03 rad) but fail on agent position (71–263 px), because the env's success check uses ‖goal[:4] − cur[:4]‖, which includes the agent. The others are near misses (block 20–43 px or angle above π/9).
 
 ### 2026-11-24 — Phase 4b: stride-2 retrain with the authors' SIGReg values (60% → 82%)
 - **Run:** `pusht_s2`, stride 2 (69,510 steps, 2.5× the stride-5 run), λ = 0.09, t ∈ [0, 3], ×N. 10 epochs finished cleanly in ≈ 3 h 56 min; val pred loss fell every epoch (0.0735 → 0.0177; stride-5 ended at 0.031).
